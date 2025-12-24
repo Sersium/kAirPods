@@ -135,14 +135,17 @@
 
             systemd.user.services.kairpodsd = lib.mkIf cfg.autoStart {
               Unit = {
-                Description = "kAirPods daemon (AirPods battery + integration)";
-                After = [ "graphical-session.target" "dbus.service" ];
-                PartOf = [ "graphical-session.target" ];
+                Description = "kAirPods D-Bus Service";
+                After = [ "graphical-session.target" ];
               };
               Service = {
+                Type = "dbus";
+                BusName = "org.kairpods";
                 ExecStart = "${cfg.package}/bin/kairpodsd";
                 Restart = "on-failure";
-                RestartSec = 1;
+                RestartSec = "5";
+                PrivateTmp = "yes";
+                NoNewPrivileges = "yes";
               };
               Install = {
                 WantedBy = [ "default.target" ];

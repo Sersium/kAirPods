@@ -133,37 +133,5 @@
             };
           };
         };
-
-      # ---------------------------
-      # NixOS module
-      # ---------------------------
-      nixosModules.default = { config, lib, pkgs, ... }:
-        let
-          cfg = config.services.kairpods;
-        in
-        {
-          options.services.kairpods = {
-            enable = lib.mkEnableOption "kAirPods: enable Bluetooth Experimental and provide guidance for user setup";
-            enableBluezExperimental = lib.mkOption {
-              type = lib.types.bool;
-              default = true;
-              description = "Enable BlueZ Experimental = true (required for AirPods battery info on many setups).";
-            };
-          };
-
-          config = lib.mkIf cfg.enable {
-            # Your script edits /etc/bluetooth/main.conf. On NixOS, do it declaratively:
-            services.bluetooth.enable = true;
-            services.bluetooth.settings = lib.mkIf cfg.enableBluezExperimental {
-              General = {
-                Experimental = true;
-              };
-            };
-
-            # Note: user must be in bluetooth group if your daemon relies on it.
-            # NixOS typically has the bluetooth group; add your user like:
-            # users.users.<name>.extraGroups = [ "bluetooth" ];
-          };
-        };
     };
 }

@@ -71,7 +71,6 @@
         in
         {
           packages = {
-            default = kairpodsd;
             kairpodsd = kairpodsd;
             plasmoid = kairpods-plasmoid;
           };

@@ -91,13 +91,13 @@
             enable = lib.mkEnableOption "kAirPods (kairpodsd user service + Plasma plasmoid)";
             package = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.system}.kairpodsd;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.kairpodsd;
               defaultText = "kAirPods kairpodsd package from this flake";
               description = "Package providing the kairpodsd binary.";
             };
             plasmoidPackage = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.system}.plasmoid;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.plasmoid;
               defaultText = "kAirPods plasmoid package from this flake";
               description = "Package providing the org.kairpods.plasma plasmoid.";
             };

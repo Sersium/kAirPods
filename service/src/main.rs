@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 use log::{info, warn};
-use tokio::{signal, sync::Notify, time};
+use tokio::{signal, sync::Notify, task::JoinHandle, time};
 use zbus::{Connection, connection, object_server::InterfaceRef};
 
 use bluetooth::manager::BluetoothManager;
@@ -16,6 +16,7 @@ use dbus::AirPodsService;
 use event::{AirPodsEvent, EventBus};
 
 mod airpods;
+mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
@@ -102,12 +103,23 @@ async fn main() -> Result<()> {
 
    info!("kAirPods D-Bus service started at org.kairpods");
 
+   // Initialize BlueZ battery provider for UPower integration
+   let battery_provider = battery_provider::BatteryProvider::new().await;
+   if battery_provider.is_none() {
+      warn!("BlueZ battery provider unavailable, UPower integration disabled");
+   }
+
    // Start event processor
-   event_bus.spawn_dispatcher(connection).await?;
+   let shutdown = Arc::new(Notify::new());
+   let dispatcher = event_bus
+      .spawn_dispatcher(connection, battery_provider, shutdown.clone())
+      .await?;
 
    // Wait for shutdown signal
    signal::ctrl_c().await?;
    info!("Shutting down kAirPods service...");
+   shutdown.notify_one();
+   let _ = dispatcher.await;
 
    Ok(())
 }
@@ -146,6 +158,7 @@ impl EventProcessor {
    async fn dispatch(
       &self,
       iface: &InterfaceRef<AirPodsService>,
+      battery_provider: &mut Option<battery_provider::BatteryProvider>,
       (device, event): (AirPods, AirPodsEvent),
    ) -> Result<()> {
       let addr_str = device.address_str();
@@ -166,6 +179,10 @@ impl EventProcessor {
          },
          AirPodsEvent::DeviceDisconnected => {
             iface.device_disconnected(addr_str).await?;
+            // Remove from BlueZ battery provider
+            if let Some(bp) = battery_provider.as_mut() {
+               bp.remove(device.address()).await;
+            }
             // Emit property changes
             iface
                .get_mut()
@@ -182,6 +199,22 @@ impl EventProcessor {
             iface
                .battery_updated(addr_str, &battery.to_json().to_string())
                .await?;
+            // Update BlueZ battery provider for UPower integration
+            if let Some(bp) = battery_provider.as_mut() {
+               let percentage = if battery.headphone.is_available() {
+                  battery.headphone.level
+               } else {
+                  let mut level = u8::MAX;
+                  if battery.left.is_available() {
+                     level = level.min(battery.left.level);
+                  }
+                  if battery.right.is_available() {
+                     level = level.min(battery.right.level);
+                  }
+                  if level == u8::MAX { 0 } else { level }
+               };
+               bp.update(device.address(), percentage).await;
+            }
             // Emit property change for devices (battery state changed)
             iface
                .get_mut()
@@ -242,20 +275,34 @@ impl EventProcessor {
       Ok(())
    }
 
-   async fn spawn_dispatcher(self: Arc<Self>, connection: Connection) -> Result<()> {
+   async fn spawn_dispatcher(
+      self: Arc<Self>,
+      connection: Connection,
+      mut battery_provider: Option<battery_provider::BatteryProvider>,
+      shutdown: Arc<Notify>,
+   ) -> Result<JoinHandle<()>> {
       let iface = connection
          .object_server()
          .interface::<_, AirPodsService>("/org/kairpods/manager")
          .await?;
-      tokio::spawn(async move {
-         while let Some(event) = self.recv().await {
-            if let Err(e) = self.dispatch(&iface, event).await {
-               warn!("Error dispatching event: {e}");
+      let handle = tokio::spawn(async move {
+         loop {
+            tokio::select! {
+               event = self.recv() => {
+                  let Some(event) = event else { break };
+                  if let Err(e) = self.dispatch(&iface, &mut battery_provider, event).await {
+                     warn!("Error dispatching event: {e}");
+                  }
+               }
+               () = shutdown.notified() => break,
             }
+         }
+         if let Some(bp) = battery_provider.as_mut() {
+            bp.shutdown().await;
          }
       });
 
-      Ok(())
+      Ok(handle)
    }
 }
 

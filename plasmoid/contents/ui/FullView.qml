@@ -182,6 +182,18 @@ Item {
                         noiseControlChanged(mode)
                     }
                 }
+
+                // Conversational Awareness toggle
+                FeatureToggle {
+                    Layout.fillWidth: true
+                    visible: currentDevice && currentDevice.connected
+                             && currentDevice.features
+                             && currentDevice.features.conversational !== undefined
+                    text: i18n("Conversational Awareness")
+                    feature: "conversational"
+                    checked: currentDevice?.conversational_awareness ?? false
+                    onToggled: featureToggled("conversational", checked)
+                }
             }
         }
 

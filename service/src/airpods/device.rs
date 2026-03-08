@@ -255,6 +255,7 @@ impl AirPods {
          .map(|(k, v)| (k.to_str(), v))
          .collect();
       info["features"] = json!(features_dict);
+      info["conversational_awareness"] = json!(self.feature_enabled(FeatureId::CONVERSATIONAL));
       info
    }
 
@@ -587,7 +588,9 @@ impl AirPods {
       } else if let Some((cmd, op)) = FeatureCmd::parse(&packet) {
          debug!("Received feature command from {address}: {cmd} {op:?}");
          if matches!(op, FeatureCmd::Enable | FeatureCmd::Disable) {
-            self.set_feature_enabled(cmd, matches!(op, FeatureCmd::Enable));
+            let enabled = matches!(op, FeatureCmd::Enable);
+            self.set_feature_enabled(cmd, enabled);
+            event_tx.emit(self, AirPodsEvent::FeatureChanged(cmd, enabled));
          }
       } else {
          let data = if packet.len() < 16 {

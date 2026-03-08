@@ -325,6 +325,17 @@ impl EventProcessor {
                .devices_changed(iface.signal_emitter())
                .await?;
          },
+         AirPodsEvent::FeatureChanged(feature, enabled) => {
+            iface
+               .feature_changed(addr_str, feature.to_str(), enabled)
+               .await?;
+            // Emit property change for devices (feature state changed)
+            iface
+               .get_mut()
+               .await
+               .devices_changed(iface.signal_emitter())
+               .await?;
+         },
       }
       Ok(())
    }

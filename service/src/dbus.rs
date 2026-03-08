@@ -186,6 +186,14 @@ impl AirPodsService {
       event: &str,
    ) -> zbus::Result<()>;
 
+   #[zbus(signal)]
+   pub async fn feature_changed(
+      emitter: &SignalEmitter<'_>,
+      address: &str,
+      feature: &str,
+      enabled: bool,
+   ) -> zbus::Result<()>;
+
    // Properties for polling-free updates
    #[zbus(property)]
    async fn devices(&self) -> String {

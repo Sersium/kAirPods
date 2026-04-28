@@ -3,16 +3,176 @@
 //! This module provides functionality to control media playback using the
 //! MPRIS (Media Player Remote Interfacing Specification) D-Bus interface.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+   sync::atomic::{AtomicBool, Ordering},
+   time::{SystemTime, UNIX_EPOCH},
+};
 
 use log::{debug, warn};
 use parking_lot::Mutex;
+use serde::Serialize;
 use zbus::Connection;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static CONTROL_OWNER: Mutex<ControlOwnerState> = Mutex::new(ControlOwnerState::new());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlOwner {
+   Linux,
+   Remote,
+   Unknown,
+}
+
+impl ControlOwner {
+   pub const fn as_str(self) -> &'static str {
+      match self {
+         Self::Linux => "linux",
+         Self::Remote => "remote",
+         Self::Unknown => "unknown",
+      }
+   }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ControlOwnerDetails {
+   pub reason: String,
+   pub observed_at_ms: u64,
+   pub owner_since_ms: u64,
+   pub last_transition_ms: u64,
+   pub confidence: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ControlOwnerState {
+   owner: ControlOwner,
+   details: Option<ControlOwnerDetails>,
+}
+
+impl ControlOwnerState {
+   fn new() -> Self {
+      Self {
+         owner: ControlOwner::Unknown,
+         details: None,
+      }
+   }
+}
+
+fn now_ms() -> u64 {
+   SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn update_control_owner(owner: ControlOwner, reason: String, confidence: f32) -> bool {
+   let now = now_ms();
+   let mut state = CONTROL_OWNER.lock();
+   let transitioned = state.owner != owner;
+   let owner_since_ms = if transitioned {
+      now
+   } else {
+      state
+         .details
+         .as_ref()
+         .map_or(now, |details| details.owner_since_ms)
+   };
+   let last_transition_ms = if transitioned {
+      now
+   } else {
+      state
+         .details
+         .as_ref()
+         .map_or(now, |details| details.last_transition_ms)
+   };
+
+   state.owner = owner;
+   state.details = Some(ControlOwnerDetails {
+      reason,
+      observed_at_ms: now,
+      owner_since_ms,
+      last_transition_ms,
+      confidence,
+   });
+   transitioned
+}
+
+pub fn control_owner() -> &'static str {
+   CONTROL_OWNER.lock().owner.as_str()
+}
+
+pub fn control_owner_details_json() -> Option<String> {
+   let details = CONTROL_OWNER.lock().details.clone()?;
+   serde_json::to_string(&details).ok()
+}
+
+pub async fn refresh_control_owner(reason: &str) -> bool {
+   let Ok(connection) = Connection::session().await else {
+      return update_control_owner(
+         ControlOwner::Unknown,
+         format!("{reason}: session bus unavailable"),
+         0.2,
+      );
+   };
+
+   let dbus_proxy = match zbus::fdo::DBusProxy::new(&connection).await {
+      Ok(proxy) => proxy,
+      Err(e) => {
+         return update_control_owner(
+            ControlOwner::Unknown,
+            format!("{reason}: dbus proxy failed: {e}"),
+            0.2,
+         );
+      },
+   };
+
+   let names = match dbus_proxy.list_names().await {
+      Ok(names) => names,
+      Err(e) => {
+         return update_control_owner(
+            ControlOwner::Unknown,
+            format!("{reason}: list_names failed: {e}"),
+            0.2,
+         );
+      },
+   };
+
+   let mut has_local_mpris = false;
+   let mut has_kdeconnect_mpris = false;
+   for name in names {
+      let name_str = name.as_str();
+      if !name_str.starts_with("org.mpris.MediaPlayer2.") {
+         continue;
+      }
+      if name_str.contains("kdeconnect") || name_str.contains("KDEConnect") {
+         has_kdeconnect_mpris = true;
+      } else {
+         has_local_mpris = true;
+      }
+   }
+
+   if has_local_mpris {
+      return update_control_owner(
+         ControlOwner::Linux,
+         format!("{reason}: local mpris players present"),
+         0.9,
+      );
+   }
+   if has_kdeconnect_mpris {
+      return update_control_owner(
+         ControlOwner::Remote,
+         format!("{reason}: only kdeconnect mpris players present"),
+         0.75,
+      );
+   }
+
+   update_control_owner(
+      ControlOwner::Unknown,
+      format!("{reason}: no mpris players detected"),
+      0.3,
+   )
+}
 
 pub fn set_enabled(enabled: bool) {
    ENABLED.store(enabled, Ordering::Relaxed);

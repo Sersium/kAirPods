@@ -26,6 +26,7 @@ pub struct OwnershipSnapshot {
 pub struct OwnershipConfig {
    pub enabled: bool,
    pub local_active_ttl_ms: u64,
+   pub remote_active_ttl_ms: u64,
    pub hysteresis_ms: u64,
    pub prefer_local_when_playing: bool,
 }
@@ -35,6 +36,7 @@ impl Default for OwnershipConfig {
       Self {
          enabled: true,
          local_active_ttl_ms: 5_000,
+         remote_active_ttl_ms: 5_000,
          hysteresis_ms: 1_000,
          prefer_local_when_playing: true,
       }
@@ -101,13 +103,17 @@ impl OwnershipPolicy {
       })
    }
 
-   fn is_remote_active(&self) -> bool {
-      self.snapshot.last_remote_hint_at.is_some()
+   fn is_remote_active(&self, now: Instant) -> bool {
+      self.snapshot.last_remote_hint_at.is_some_and(|at| {
+         now.checked_duration_since(at).is_some_and(|elapsed| {
+            elapsed <= Duration::from_millis(self.config.remote_active_ttl_ms)
+         })
+      })
    }
 
    fn desired_owner(&self, now: Instant) -> (ControlOwner, &'static str) {
       let local_active = self.is_local_active(now);
-      let remote_active = self.is_remote_active();
+      let remote_active = self.is_remote_active(now);
 
       if self.config.prefer_local_when_playing && local_active {
          return (ControlOwner::Linux, "local playback active");
@@ -172,6 +178,7 @@ mod tests {
       let mut policy = OwnershipPolicy::new(OwnershipConfig {
          enabled: true,
          local_active_ttl_ms: 100,
+         remote_active_ttl_ms: 500,
          hysteresis_ms: 0,
          prefer_local_when_playing: true,
       });
@@ -195,6 +202,7 @@ mod tests {
       let mut policy = OwnershipPolicy::new(OwnershipConfig {
          enabled: true,
          local_active_ttl_ms: 5_000,
+         remote_active_ttl_ms: 5_000,
          hysteresis_ms: 2_000,
          prefer_local_when_playing: true,
       });
@@ -213,6 +221,28 @@ mod tests {
       assert_eq!(
          policy.current_owner(start + Duration::from_millis(2_500)),
          ControlOwner::Remote
+      );
+   }
+
+   #[test]
+   fn stale_remote_hint_expires_to_unknown() {
+      let mut policy = OwnershipPolicy::new(OwnershipConfig {
+         enabled: true,
+         local_active_ttl_ms: 100,
+         remote_active_ttl_ms: 200,
+         hysteresis_ms: 0,
+         prefer_local_when_playing: true,
+      });
+      let start = Instant::now();
+
+      policy.update_from_airpods_hint(RemoteHint::Active, start);
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(100)),
+         ControlOwner::Remote
+      );
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(250)),
+         ControlOwner::Unknown
       );
    }
 }

@@ -137,11 +137,18 @@ impl OwnershipPolicy {
          return;
       }
 
+      // When prefer_local_when_playing is set and local playback is active, Linux
+      // should seize control immediately without waiting for the hysteresis window.
+      let bypass_hysteresis = self.config.prefer_local_when_playing
+         && desired_owner == ControlOwner::Linux
+         && self.is_local_active(now);
+
       let hysteresis = Duration::from_millis(self.config.hysteresis_ms);
-      let in_hysteresis_window = self.last_owner_change_at.is_some_and(|at| {
-         now.checked_duration_since(at)
-            .is_some_and(|elapsed| elapsed < hysteresis)
-      });
+      let in_hysteresis_window = !bypass_hysteresis
+         && self.last_owner_change_at.is_some_and(|at| {
+            now.checked_duration_since(at)
+               .is_some_and(|elapsed| elapsed < hysteresis)
+         });
 
       if in_hysteresis_window {
          self.snapshot.reason = "hysteresis hold";

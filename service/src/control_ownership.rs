@@ -1,85 +1,255 @@
-//! Ownership engine for deciding whether media control should be handled
-//! locally on Linux or delegated to a remote controller.
-
-use zbus::Connection;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlOwner {
    Linux,
    Remote,
+   Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteHint {
+   Active,
+   Idle,
+   Unknown,
 }
 
 #[derive(Debug, Clone)]
-pub struct OwnershipDecision {
+pub struct OwnershipSnapshot {
    pub owner: ControlOwner,
-   pub reason: String,
+   pub reason: &'static str,
+   pub last_local_playing_at: Option<Instant>,
+   pub last_remote_hint_at: Option<Instant>,
 }
 
-/// Per-process ownership engine.
-///
-/// Reuses the caller's `Connection` to avoid extra session-bus connections on
-/// every gesture event.
-#[derive(Debug, Default)]
-pub struct OwnershipEngine;
+#[derive(Debug, Clone, Copy)]
+pub struct OwnershipConfig {
+   pub enabled: bool,
+   pub local_active_ttl_ms: u64,
+   pub remote_active_ttl_ms: u64,
+   pub hysteresis_ms: u64,
+   pub prefer_local_when_playing: bool,
+}
 
-impl OwnershipEngine {
-   pub fn new() -> Self {
-      Self
+impl Default for OwnershipConfig {
+   fn default() -> Self {
+      Self {
+         enabled: true,
+         local_active_ttl_ms: 5_000,
+         remote_active_ttl_ms: 5_000,
+         hysteresis_ms: 1_000,
+         prefer_local_when_playing: true,
+      }
+   }
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnershipPolicy {
+   pub config: OwnershipConfig,
+   snapshot: OwnershipSnapshot,
+   last_owner_change_at: Option<Instant>,
+}
+
+impl OwnershipPolicy {
+   pub fn new(config: OwnershipConfig) -> Self {
+      Self {
+         config,
+         snapshot: OwnershipSnapshot {
+            owner: ControlOwner::Unknown,
+            reason: "initialized",
+            last_local_playing_at: None,
+            last_remote_hint_at: None,
+         },
+         last_owner_change_at: None,
+      }
    }
 
-   /// Decide whether the local process or a remote controller should handle
-   /// the next media command, using the provided session-bus connection so
-   /// that no extra connection is established per gesture.
-   pub async fn decide_for_media_command(&self, connection: &Connection) -> OwnershipDecision {
-      let dbus_proxy = match zbus::fdo::DBusProxy::new(connection).await {
-         Ok(proxy) => proxy,
-         Err(e) => {
-            return OwnershipDecision {
-               owner: ControlOwner::Linux,
-               reason: format!("defaulting to local ownership (failed to create D-Bus proxy: {e})"),
-            };
+   pub fn snapshot(&self) -> &OwnershipSnapshot {
+      &self.snapshot
+   }
+
+   pub fn update_from_local_playback(&mut self, is_playing: bool, now: Instant) {
+      self.snapshot.last_local_playing_at = is_playing.then_some(now);
+      self.reconcile(now);
+   }
+
+   pub fn update_from_airpods_hint(&mut self, hint: RemoteHint, now: Instant) {
+      match hint {
+         RemoteHint::Active => {
+            self.snapshot.last_remote_hint_at = Some(now);
          },
-      };
-
-      let names = match dbus_proxy.list_names().await {
-         Ok(names) => names,
-         Err(e) => {
-            return OwnershipDecision {
-               owner: ControlOwner::Linux,
-               reason: format!("defaulting to local ownership (failed to list bus names: {e})"),
-            };
+         RemoteHint::Idle => {
+            self.snapshot.last_remote_hint_at = None;
          },
-      };
+         RemoteHint::Unknown => {},
+      }
+      self.reconcile(now);
+   }
 
-      let has_local_mpris = names.iter().any(|name| {
-         let name = name.as_str();
-         name.starts_with("org.mpris.MediaPlayer2.")
-            && !name.contains("kdeconnect")
-            && !name.contains("KDEConnect")
+   pub fn current_owner(&mut self, now: Instant) -> ControlOwner {
+      self.reconcile(now);
+      self.snapshot.owner
+   }
+
+   pub fn should_handle_media_controls(&mut self, now: Instant) -> bool {
+      !self.config.enabled || self.current_owner(now) == ControlOwner::Linux
+   }
+
+   fn is_local_active(&self, now: Instant) -> bool {
+      self.snapshot.last_local_playing_at.is_some_and(|at| {
+         now.checked_duration_since(at).is_some_and(|elapsed| {
+            elapsed <= Duration::from_millis(self.config.local_active_ttl_ms)
+         })
+      })
+   }
+
+   fn is_remote_active(&self, now: Instant) -> bool {
+      self.snapshot.last_remote_hint_at.is_some_and(|at| {
+         now.checked_duration_since(at).is_some_and(|elapsed| {
+            elapsed <= Duration::from_millis(self.config.remote_active_ttl_ms)
+         })
+      })
+   }
+
+   fn desired_owner(&self, now: Instant) -> (ControlOwner, &'static str) {
+      let local_active = self.is_local_active(now);
+      let remote_active = self.is_remote_active(now);
+
+      if self.config.prefer_local_when_playing && local_active {
+         return (ControlOwner::Linux, "local playback active");
+      }
+
+      if remote_active {
+         return (ControlOwner::Remote, "recent remote hint");
+      }
+
+      if local_active {
+         return (ControlOwner::Linux, "local playback active");
+      }
+
+      (ControlOwner::Unknown, "no active hints")
+   }
+
+   fn reconcile(&mut self, now: Instant) {
+      let (desired_owner, desired_reason) = self.desired_owner(now);
+      if desired_owner == self.snapshot.owner {
+         self.snapshot.reason = desired_reason;
+         return;
+      }
+
+      // When prefer_local_when_playing is set and local playback is active, Linux
+      // should seize control immediately without waiting for the hysteresis window.
+      let bypass_hysteresis = self.config.prefer_local_when_playing
+         && desired_owner == ControlOwner::Linux
+         && self.is_local_active(now);
+
+      let hysteresis = Duration::from_millis(self.config.hysteresis_ms);
+      let in_hysteresis_window = !bypass_hysteresis
+         && self.last_owner_change_at.is_some_and(|at| {
+            now.checked_duration_since(at)
+               .is_some_and(|elapsed| elapsed < hysteresis)
+         });
+
+      if in_hysteresis_window {
+         self.snapshot.reason = "hysteresis hold";
+         return;
+      }
+
+      self.snapshot.owner = desired_owner;
+      self.snapshot.reason = desired_reason;
+      self.last_owner_change_at = Some(now);
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn linux_playing_wins() {
+      let mut policy = OwnershipPolicy::new(OwnershipConfig::default());
+      let start = Instant::now();
+
+      policy.update_from_airpods_hint(RemoteHint::Active, start);
+      policy.update_from_local_playback(true, start + Duration::from_millis(10));
+
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(20)),
+         ControlOwner::Linux
+      );
+      assert!(policy.should_handle_media_controls(start + Duration::from_millis(20)));
+   }
+
+   #[test]
+   fn idle_timeout_flips_to_remote() {
+      let mut policy = OwnershipPolicy::new(OwnershipConfig {
+         enabled: true,
+         local_active_ttl_ms: 100,
+         remote_active_ttl_ms: 500,
+         hysteresis_ms: 0,
+         prefer_local_when_playing: true,
       });
-      if has_local_mpris {
-         return OwnershipDecision {
-            owner: ControlOwner::Linux,
-            reason: "local MPRIS player detected".to_string(),
-         };
-      }
+      let start = Instant::now();
 
-      let has_kdeconnect_mpris = names.iter().any(|name| {
-         let name = name.as_str();
-         name.starts_with("org.mpris.MediaPlayer2.")
-            && (name.contains("kdeconnect") || name.contains("KDEConnect"))
+      policy.update_from_local_playback(true, start);
+      policy.update_from_airpods_hint(RemoteHint::Active, start + Duration::from_millis(1));
+
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(10)),
+         ControlOwner::Linux
+      );
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(150)),
+         ControlOwner::Remote
+      );
+   }
+
+   #[test]
+   fn hysteresis_prevents_owner_flapping() {
+      let mut policy = OwnershipPolicy::new(OwnershipConfig {
+         enabled: true,
+         local_active_ttl_ms: 5_000,
+         remote_active_ttl_ms: 5_000,
+         hysteresis_ms: 2_000,
+         prefer_local_when_playing: true,
       });
+      let start = Instant::now();
 
-      if has_kdeconnect_mpris {
-         return OwnershipDecision {
-            owner: ControlOwner::Remote,
-            reason: "no local MPRIS player but KDE Connect MPRIS bridge is present".to_string(),
-         };
-      }
+      policy.update_from_local_playback(true, start);
+      assert_eq!(policy.current_owner(start), ControlOwner::Linux);
 
-      OwnershipDecision {
-         owner: ControlOwner::Linux,
-         reason: "no MPRIS players found, defaulting to local ownership".to_string(),
-      }
+      policy.update_from_local_playback(false, start + Duration::from_millis(100));
+      policy.update_from_airpods_hint(RemoteHint::Active, start + Duration::from_millis(150));
+
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(500)),
+         ControlOwner::Linux
+      );
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(2_500)),
+         ControlOwner::Remote
+      );
+   }
+
+   #[test]
+   fn stale_remote_hint_expires_to_unknown() {
+      let mut policy = OwnershipPolicy::new(OwnershipConfig {
+         enabled: true,
+         local_active_ttl_ms: 100,
+         remote_active_ttl_ms: 200,
+         hysteresis_ms: 0,
+         prefer_local_when_playing: true,
+      });
+      let start = Instant::now();
+
+      policy.update_from_airpods_hint(RemoteHint::Active, start);
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(100)),
+         ControlOwner::Remote
+      );
+      assert_eq!(
+         policy.current_owner(start + Duration::from_millis(250)),
+         ControlOwner::Unknown
+      );
    }
 }

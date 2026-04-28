@@ -4,10 +4,14 @@
 //! in KDE Plasma, including battery monitoring, noise control, and
 //! feature management.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+   sync::Arc,
+   time::{Duration, Instant},
+};
 
 use crossbeam::queue::SegQueue;
 use log::{debug, info, warn};
+use parking_lot::Mutex;
 use tokio::{signal, sync::Notify, task::JoinHandle, time};
 use zbus::{Connection, connection, object_server::InterfaceRef};
 
@@ -20,6 +24,8 @@ mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
+// Remote-hint integration not yet wired; suppress dead_code for those APIs.
+#[allow(dead_code)]
 mod control_ownership;
 mod dbus;
 mod error;
@@ -137,7 +143,7 @@ struct EventProcessor {
    queue: SegQueue<(AirPods, AirPodsEvent)>,
    notifier: Notify,
    gesture_config: config::GestureConfig,
-   ownership_engine: control_ownership::OwnershipEngine,
+   ownership_policy: Mutex<control_ownership::OwnershipPolicy>,
 }
 
 impl EventProcessor {
@@ -146,7 +152,7 @@ impl EventProcessor {
          queue: SegQueue::new(),
          notifier: Notify::new(),
          gesture_config,
-         ownership_engine: control_ownership::OwnershipEngine::new(),
+         ownership_policy: Mutex::new(control_ownership::OwnershipPolicy::new(Default::default())),
       })
    }
 }
@@ -170,7 +176,6 @@ impl EventProcessor {
 
    async fn dispatch(
       &self,
-      connection: &Connection,
       iface: &InterfaceRef<AirPodsService>,
       battery_provider: &mut Option<battery_provider::BatteryProvider>,
       (device, event): (AirPods, AirPodsEvent),
@@ -259,7 +264,10 @@ impl EventProcessor {
             // Handle play/pause based on ear detection
             // Pause when at least one earbud is removed, play only when both are in
             let both_in_ear = ear_detection.is_left_in_ear() && ear_detection.is_right_in_ear();
-
+            self
+               .ownership_policy
+               .lock()
+               .update_from_local_playback(both_in_ear, Instant::now());
             if both_in_ear {
                // Both AirPods are in ear - send play command
                media_control::send_play().await;
@@ -282,44 +290,36 @@ impl EventProcessor {
 
             match action {
                GestureAction::PlayPause => {
-                  let decision = self
-                     .ownership_engine
-                     .decide_for_media_command(connection)
-                     .await;
-                  match decision.owner {
-                     control_ownership::ControlOwner::Linux => {
-                        media_control::send_play_pause().await
-                     },
-                     control_ownership::ControlOwner::Remote => debug!(
-                        "Skipping local PlayPause: ownership is remote ({})",
-                        decision.reason
-                     ),
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_play_pause().await
+                  } else {
+                     debug!("Skipping local PlayPause: remote has media ownership")
                   }
                },
                GestureAction::Next => {
-                  let decision = self
-                     .ownership_engine
-                     .decide_for_media_command(connection)
-                     .await;
-                  match decision.owner {
-                     control_ownership::ControlOwner::Linux => media_control::send_next().await,
-                     control_ownership::ControlOwner::Remote => debug!(
-                        "Skipping local Next: ownership is remote ({})",
-                        decision.reason
-                     ),
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_next().await
+                  } else {
+                     debug!("Skipping local Next: remote has media ownership")
                   }
                },
                GestureAction::Previous => {
-                  let decision = self
-                     .ownership_engine
-                     .decide_for_media_command(connection)
-                     .await;
-                  match decision.owner {
-                     control_ownership::ControlOwner::Linux => media_control::send_previous().await,
-                     control_ownership::ControlOwner::Remote => debug!(
-                        "Skipping local Previous: ownership is remote ({})",
-                        decision.reason
-                     ),
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_previous().await
+                  } else {
+                     debug!("Skipping local Previous: remote has media ownership")
                   }
                },
                GestureAction::CycleNoiseMode => {
@@ -398,7 +398,7 @@ impl EventProcessor {
             tokio::select! {
                event = self.recv() => {
                   let Some(event) = event else { break };
-                  if let Err(e) = self.dispatch(&connection, &iface, &mut battery_provider, event).await {
+                  if let Err(e) = self.dispatch(&iface, &mut battery_provider, event).await {
                      warn!("Error dispatching event: {e}");
                   }
                }

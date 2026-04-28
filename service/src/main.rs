@@ -20,6 +20,8 @@ mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
+#[allow(dead_code)]
+mod control_ownership;
 mod dbus;
 mod error;
 mod event;

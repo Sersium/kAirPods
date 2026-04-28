@@ -4,6 +4,7 @@
 //! MPRIS (Media Player Remote Interfacing Specification) D-Bus interface.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 use parking_lot::Mutex;
@@ -13,6 +14,13 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static PLAYING_PLAYERS_CACHE: Mutex<Option<PlayingPlayersCache>> = Mutex::new(None);
+const PLAYING_PLAYERS_CACHE_TTL: Duration = Duration::from_millis(300);
+
+struct PlayingPlayersCache {
+   updated_at: Instant,
+   players: Vec<String>,
+}
 
 pub fn set_enabled(enabled: bool) {
    ENABLED.store(enabled, Ordering::Relaxed);
@@ -76,72 +84,24 @@ pub async fn send_pause() {
       return;
    }
 
-   // Find all playing players and pause them all
-   let Ok(connection) = Connection::session().await else {
-      warn!("Failed to connect to D-Bus session");
-      return;
-   };
-
-   let dbus_proxy = match zbus::fdo::DBusProxy::new(&connection).await {
-      Ok(proxy) => proxy,
-      Err(e) => {
-         warn!("Failed to create D-Bus proxy: {e}");
-         return;
-      },
-   };
-
-   let names = match dbus_proxy.list_names().await {
-      Ok(names) => names,
-      Err(e) => {
-         warn!("Failed to list D-Bus names: {e}");
-         return;
-      },
-   };
-
-   // Find all MPRIS media players (excluding KDE Connect, which is for remote control)
-   let mpris_services: Vec<_> = names
-      .iter()
-      .filter(|name| {
-         let name_str = name.as_str();
-         name_str.starts_with("org.mpris.MediaPlayer2.")
-            && !name_str.contains("kdeconnect")
-            && !name_str.contains("KDEConnect")
-      })
-      .collect();
-
-   if mpris_services.is_empty() {
-      debug!("No MPRIS media players found");
+   let playing_players = list_playing_players().await;
+   if playing_players.is_empty() {
+      debug!("No playing players found to pause");
       return;
    }
 
-   debug!(
-      "Found {} MPRIS player(s), checking which are playing",
-      mpris_services.len()
-   );
-
    let mut paused_players = Vec::new();
 
-   // Check each player and pause all that are playing
-   for service_name in &mpris_services {
-      // Check if this player is playing
-      if let Ok(was_playing) = is_player_playing(service_name.as_str()).await {
-         if was_playing {
-            debug!("Player {service_name} is playing, pausing it");
-            // Pause this player
-            match send_mpris_command_to_player("Pause", service_name.as_str()).await {
-               Ok(()) => {
-                  debug!("Successfully paused player: {service_name}");
-                  paused_players.push(service_name.as_str().to_string());
-               },
-               Err(e) => {
-                  warn!("Failed to pause player {service_name}: {e}");
-               },
-            }
-         } else {
-            debug!("Player {service_name} is not playing, skipping");
-         }
-      } else {
-         debug!("Could not check playback status for player {service_name}, skipping");
+   for service_name in &playing_players {
+      debug!("Player {service_name} is playing, pausing it");
+      match send_mpris_command_to_player("Pause", service_name).await {
+         Ok(()) => {
+            debug!("Successfully paused player: {service_name}");
+            paused_players.push(service_name.clone());
+         },
+         Err(e) => {
+            warn!("Failed to pause player {service_name}: {e}");
+         },
       }
    }
 
@@ -156,6 +116,64 @@ pub async fn send_pause() {
       // Store all paused players
       *PAUSED_PLAYERS.lock() = paused_players;
    }
+}
+
+pub async fn any_local_player_playing() -> bool {
+   !list_playing_players().await.is_empty()
+}
+
+pub async fn list_playing_players() -> Vec<String> {
+   if let Some(cached_players) = get_cached_playing_players(Instant::now()) {
+      return cached_players;
+   }
+
+   let players = list_playing_players_uncached().await;
+   set_cached_playing_players(players.clone(), Instant::now());
+   players
+}
+
+async fn list_playing_players_uncached() -> Vec<String> {
+   let mpris_services = discover_mpris_players().await;
+   if mpris_services.is_empty() {
+      debug!("No MPRIS media players found");
+      return Vec::new();
+   }
+
+   let mut playing_players = Vec::new();
+   for service_name in &mpris_services {
+      match is_player_playing(service_name).await {
+         Ok(true) => playing_players.push(service_name.clone()),
+         Ok(false) => {},
+         Err(e) => debug!("Could not check playback status for player {service_name}: {e}"),
+      }
+   }
+
+   playing_players
+}
+
+fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
+   let cache = PLAYING_PLAYERS_CACHE.lock();
+   let Some(cache) = cache.as_ref() else {
+      return None;
+   };
+
+   if now.duration_since(cache.updated_at) <= PLAYING_PLAYERS_CACHE_TTL {
+      return Some(cache.players.clone());
+   }
+   None
+}
+
+fn set_cached_playing_players(players: Vec<String>, now: Instant) {
+   *PLAYING_PLAYERS_CACHE.lock() = Some(PlayingPlayersCache {
+      updated_at: now,
+      players,
+   });
+}
+
+fn is_supported_mpris_service_name(service_name: &str) -> bool {
+   service_name.starts_with("org.mpris.MediaPlayer2.")
+      && !service_name.contains("kdeconnect")
+      && !service_name.contains("KDEConnect")
 }
 
 /// Checks if a specific player is currently playing.
@@ -213,19 +231,32 @@ async fn send_mpris_command_to_player(
 
 /// Finds the first active MPRIS player on the session bus.
 async fn find_first_mpris_player() -> Option<String> {
-   let connection = Connection::session().await.ok()?;
-   let dbus_proxy = zbus::fdo::DBusProxy::new(&connection).await.ok()?;
-   let names = dbus_proxy.list_names().await.ok()?;
+   let mpris_players = discover_mpris_players().await;
+   mpris_players.first().cloned()
+}
+
+async fn discover_mpris_players() -> Vec<String> {
+   let Ok(connection) = Connection::session().await else {
+      warn!("Failed to connect to D-Bus session");
+      return Vec::new();
+   };
+
+   let Ok(dbus_proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
+      warn!("Failed to create D-Bus proxy");
+      return Vec::new();
+   };
+
+   let Ok(names) = dbus_proxy.list_names().await else {
+      warn!("Failed to list D-Bus names");
+      return Vec::new();
+   };
 
    names
       .iter()
-      .find(|name| {
-         let s = name.as_str();
-         s.starts_with("org.mpris.MediaPlayer2.")
-            && !s.contains("kdeconnect")
-            && !s.contains("KDEConnect")
-      })
-      .map(|n| n.as_str().to_string())
+      .map(|name| name.as_str())
+      .filter(|name| is_supported_mpris_service_name(name))
+      .map(str::to_string)
+      .collect()
 }
 
 /// Sends a PlayPause toggle to the first active MPRIS player.
@@ -264,5 +295,37 @@ pub async fn send_previous() {
       }
    } else {
       debug!("No MPRIS player found for Previous command");
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn filters_supported_mpris_players() {
+      assert!(is_supported_mpris_service_name(
+         "org.mpris.MediaPlayer2.firefox"
+      ));
+      assert!(!is_supported_mpris_service_name("org.kde.foo"));
+      assert!(!is_supported_mpris_service_name(
+         "org.mpris.MediaPlayer2.kdeconnect.instance"
+      ));
+      assert!(!is_supported_mpris_service_name(
+         "org.mpris.MediaPlayer2.KDEConnect.instance"
+      ));
+   }
+
+   #[test]
+   fn playing_players_cache_honors_ttl() {
+      let now = Instant::now();
+      let players = vec!["org.mpris.MediaPlayer2.firefox".to_string()];
+
+      set_cached_playing_players(players.clone(), now);
+      assert_eq!(get_cached_playing_players(now), Some(players.clone()));
+      assert_eq!(
+         get_cached_playing_players(now + PLAYING_PLAYERS_CACHE_TTL + Duration::from_millis(1)),
+         None
+      );
    }
 }

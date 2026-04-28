@@ -170,6 +170,7 @@ impl EventProcessor {
 
    async fn dispatch(
       &self,
+      connection: &Connection,
       iface: &InterfaceRef<AirPodsService>,
       battery_provider: &mut Option<battery_provider::BatteryProvider>,
       (device, event): (AirPods, AirPodsEvent),
@@ -258,7 +259,6 @@ impl EventProcessor {
             // Handle play/pause based on ear detection
             // Pause when at least one earbud is removed, play only when both are in
             let both_in_ear = ear_detection.is_left_in_ear() && ear_detection.is_right_in_ear();
-            self.ownership_engine.on_ear_detection(both_in_ear);
 
             if both_in_ear {
                // Both AirPods are in ear - send play command
@@ -282,7 +282,10 @@ impl EventProcessor {
 
             match action {
                GestureAction::PlayPause => {
-                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  let decision = self
+                     .ownership_engine
+                     .decide_for_media_command(connection)
+                     .await;
                   match decision.owner {
                      control_ownership::ControlOwner::Linux => {
                         media_control::send_play_pause().await
@@ -294,7 +297,10 @@ impl EventProcessor {
                   }
                },
                GestureAction::Next => {
-                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  let decision = self
+                     .ownership_engine
+                     .decide_for_media_command(connection)
+                     .await;
                   match decision.owner {
                      control_ownership::ControlOwner::Linux => media_control::send_next().await,
                      control_ownership::ControlOwner::Remote => debug!(
@@ -304,7 +310,10 @@ impl EventProcessor {
                   }
                },
                GestureAction::Previous => {
-                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  let decision = self
+                     .ownership_engine
+                     .decide_for_media_command(connection)
+                     .await;
                   match decision.owner {
                      control_ownership::ControlOwner::Linux => media_control::send_previous().await,
                      control_ownership::ControlOwner::Remote => debug!(
@@ -389,7 +398,7 @@ impl EventProcessor {
             tokio::select! {
                event = self.recv() => {
                   let Some(event) = event else { break };
-                  if let Err(e) = self.dispatch(&iface, &mut battery_provider, event).await {
+                  if let Err(e) = self.dispatch(&connection, &iface, &mut battery_provider, event).await {
                      warn!("Error dispatching event: {e}");
                   }
                }

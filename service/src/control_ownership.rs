@@ -1,21 +1,12 @@
 //! Ownership engine for deciding whether media control should be handled
 //! locally on Linux or delegated to a remote controller.
 
-use std::sync::Mutex;
-
-use log::warn;
 use zbus::Connection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlOwner {
    Linux,
    Remote,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EarHint {
-   BothIn,
-   OneOrMoreOut,
 }
 
 #[derive(Debug, Clone)]
@@ -25,47 +16,22 @@ pub struct OwnershipDecision {
 }
 
 /// Per-process ownership engine.
+///
+/// Reuses the caller's `Connection` to avoid extra session-bus connections on
+/// every gesture event.
 #[derive(Debug, Default)]
-pub struct OwnershipEngine {
-   last_ear_hint: Mutex<Option<EarHint>>,
-}
+pub struct OwnershipEngine;
 
 impl OwnershipEngine {
    pub fn new() -> Self {
-      Self::default()
+      Self
    }
 
-   pub fn on_ear_detection(&self, both_in_ear: bool) {
-      let hint = if both_in_ear {
-         EarHint::BothIn
-      } else {
-         EarHint::OneOrMoreOut
-      };
-
-      match self.last_ear_hint.lock() {
-         Ok(mut state) => {
-            *state = Some(hint);
-         },
-         Err(e) => {
-            warn!("Ownership engine ear-hint lock poisoned: {e}");
-         },
-      }
-   }
-
-   pub async fn decide_for_media_command(&self) -> OwnershipDecision {
-      let connection = match Connection::session().await {
-         Ok(connection) => connection,
-         Err(e) => {
-            return OwnershipDecision {
-               owner: ControlOwner::Linux,
-               reason: format!(
-                  "defaulting to local ownership (failed to connect to session bus: {e})"
-               ),
-            };
-         },
-      };
-
-      let dbus_proxy = match zbus::fdo::DBusProxy::new(&connection).await {
+   /// Decide whether the local process or a remote controller should handle
+   /// the next media command, using the provided session-bus connection so
+   /// that no extra connection is established per gesture.
+   pub async fn decide_for_media_command(&self, connection: &Connection) -> OwnershipDecision {
+      let dbus_proxy = match zbus::fdo::DBusProxy::new(connection).await {
          Ok(proxy) => proxy,
          Err(e) => {
             return OwnershipDecision {
@@ -111,18 +77,9 @@ impl OwnershipEngine {
          };
       }
 
-      let hint_reason = match self.last_ear_hint.lock() {
-         Ok(state) => match *state {
-            Some(EarHint::BothIn) => "last ear-detection hint: both in-ear",
-            Some(EarHint::OneOrMoreOut) => "last ear-detection hint: one or more out-of-ear",
-            None => "no ear-detection hint available",
-         },
-         Err(_) => "ear-detection hint unavailable (lock poisoned)",
-      };
-
       OwnershipDecision {
          owner: ControlOwner::Linux,
-         reason: format!("defaulting to local ownership ({hint_reason})"),
+         reason: "no MPRIS players found, defaulting to local ownership".to_string(),
       }
    }
 }

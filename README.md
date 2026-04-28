@@ -125,6 +125,33 @@ Click the widget to see battery levels and control your AirPods
 
 ---
 
+## 🔄 Seamless Multipoint
+
+kAirPods supports AirPods seamless multipoint-style handoff behavior between Linux and Apple devices.
+
+- **BlueZ DeviceID prerequisite**: this feature assumes you already configured BlueZ to expose an Apple vendor DeviceID (as required by AirPods).
+- **Expected behavior**:
+  - If Linux is actively playing audio, AirPods should prefer Linux ownership.
+  - If iPhone/iPad starts playback, AirPods may hand off to iOS and Linux audio should pause/lose route.
+  - Returning playback to Linux should reacquire ownership automatically once Linux becomes the active audio source.
+- **Ownership logic**:
+  - AirPods generally keep a **single active audio owner** at any time.
+  - kAirPods does not force a permanent lock; it follows the device-driven handoff decisions and reconnects when Linux becomes active again.
+
+### Quick Verification
+
+1. **Linux playing test**
+   - Start playback on Linux.
+   - Confirm audio is routed to AirPods and kAirPods shows the device as connected.
+2. **iPhone playing test**
+   - While Linux is paused/idle, start playback on iPhone.
+   - Confirm handoff occurs and iPhone becomes active output.
+3. **Case in/out reconnect test**
+   - Put AirPods in case, close for a few seconds, then reopen and wear them again.
+   - Confirm Linux reconnects and status updates resume.
+
+---
+
 ## 🛠️ Troubleshooting
 
 <details>
@@ -215,6 +242,34 @@ Common causes for missing battery info:
 - Enhanced Retransmission Mode (ERTM) disabled
 - Outdated BlueZ version (need ≥ 5.50)
 </details>
+
+<details>
+<summary><b>Handoff is not switching between Linux and iPhone</b></summary>
+
+1. **Inspect service logs**:
+
+   ```bash
+   journalctl --user -u kairpodsd.service -b --no-pager
+   ```
+
+2. **Watch D-Bus signals live**:
+
+   ```bash
+   busctl --user monitor org.kairpods
+   ```
+
+3. **Check expected D-Bus state**:
+   - `org.kairpods.manager.ConnectedCount` should reflect current Linux-side ownership.
+   - `DeviceConnected` / `DeviceDisconnected` signals should appear during handoff/reconnect.
+   - `GetDevice` / `GetDevices` output should continue updating `battery` and feature fields after reconnect.
+
+4. **BlueZ-side checks**:
+   - Verify AirPods remain paired/trusted in BlueZ.
+   - Ensure your BlueZ DeviceID Apple vendor configuration is still present after updates.
+
+</details>
+
+> ⚠️ Packet-level behavior can vary across AirPods generations and firmware revisions. Exact handoff timing and reconnect patterns may differ by model.
 
 ---
 

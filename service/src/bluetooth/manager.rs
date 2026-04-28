@@ -25,6 +25,7 @@ use crate::{
    config::Config,
    error::{AirPodsError, Result},
    event::{AirPodsEvent, EventSender},
+   metrics::{ReconnectCategory, debug_metrics},
 };
 use rand::Rng;
 
@@ -105,7 +106,11 @@ enum ManagerCommand {
    DeviceLost(Address),
 
    // User commands
-   EstablishAAP(Address, Option<oneshot::Sender<Result<()>>>),
+   EstablishAAP(
+      Address,
+      ReconnectCategory,
+      Option<oneshot::Sender<Result<()>>>,
+   ),
    DisconnectAAP(Address, Option<oneshot::Sender<Result<()>>>),
    GetDeviceState(Address, oneshot::Sender<Option<AirPods>>),
    GetAllDeviceStates(oneshot::Sender<Vec<AirPods>>),
@@ -141,7 +146,11 @@ impl BluetoothManager {
       let (tx, rx) = oneshot::channel();
       self
          .inbox
-         .send(ManagerCommand::EstablishAAP(address, Some(tx)))
+         .send(ManagerCommand::EstablishAAP(
+            address,
+            ReconnectCategory::Manual,
+            Some(tx),
+         ))
          .await
          .map_err(|_| AirPodsError::ManagerShutdown)?;
       rx.await.map_err(|_| AirPodsError::ManagerShutdown)?
@@ -469,8 +478,8 @@ impl ManagerActor {
          ManagerCommand::DeviceLost(addr) => {
             self.handle_device_lost(addr);
          },
-         ManagerCommand::EstablishAAP(addr, reply) => {
-            let result = self.establish_aap_connection(addr).await;
+         ManagerCommand::EstablishAAP(addr, category, reply) => {
+            let result = self.establish_aap_connection(addr, category).await;
             if let Some(reply) = reply {
                let _ = reply.send(result);
             }
@@ -530,7 +539,9 @@ impl ManagerActor {
             .collect();
 
          for addr in devices_to_reconnect {
-            let _ = self.establish_aap_connection(addr).await;
+            let _ = self
+               .establish_aap_connection(addr, ReconnectCategory::Warm)
+               .await;
          }
       } else {
          self.initialize_adapter(name).await;
@@ -648,7 +659,9 @@ impl ManagerActor {
       self.devices.insert(addr, managed);
 
       // Establish AAP connection for already-connected device
-      let _ = self.establish_aap_connection(addr).await;
+      let _ = self
+         .establish_aap_connection(addr, ReconnectCategory::Warm)
+         .await;
    }
 
    async fn handle_bluetooth_connected(&mut self, addr: Address) {
@@ -675,7 +688,9 @@ impl ManagerActor {
 
       if is_airpods {
          // Automatically establish AAP connection
-         let _ = self.establish_aap_connection(addr).await;
+         let _ = self
+            .establish_aap_connection(addr, ReconnectCategory::Warm)
+            .await;
       }
    }
 
@@ -706,6 +721,7 @@ impl ManagerActor {
          self
             .event_tx
             .emit(&device.device, AirPodsEvent::DeviceConnected);
+         debug_metrics().note_reconnect_result(true, "aap_connected");
       }
 
       self.aap_connecting.remove(&addr);
@@ -726,12 +742,20 @@ impl ManagerActor {
             tokio::spawn(async move {
                time::sleep(delay).await;
                let _ = loopback
-                  .send(ManagerCommand::EstablishAAP(addr, None))
+                  .send(ManagerCommand::EstablishAAP(
+                     addr,
+                     ReconnectCategory::Backoff,
+                     None,
+                  ))
                   .await;
             });
          } else {
             device.aap_state = AAPState::Disconnected;
             device.aap_retry_count = 0;
+         }
+
+         if is_error {
+            debug_metrics().note_reconnect_result(false, "aap_disconnected_error");
          }
       }
 
@@ -747,16 +771,24 @@ impl ManagerActor {
       self.aap_connecting.remove(&addr);
    }
 
-   async fn establish_aap_connection(&mut self, addr: Address) -> Result<()> {
+   async fn establish_aap_connection(
+      &mut self,
+      addr: Address,
+      category: ReconnectCategory,
+   ) -> Result<()> {
+      debug_metrics().note_reconnect_attempt(category);
+
       // Check if already connecting
       if self.aap_connecting.contains(&addr) {
+         debug_metrics().note_reconnect_result(false, "already_connecting");
          return Err(AirPodsError::AlreadyConnecting);
       }
 
       let device = self
          .devices
          .get_mut(&addr)
-         .ok_or(AirPodsError::DeviceNotFound(addr))?;
+         .ok_or(AirPodsError::DeviceNotFound(addr))
+         .inspect_err(|_| debug_metrics().note_reconnect_result(false, "device_not_found"))?;
 
       // Check adapter is available
       let adapter_info = self
@@ -765,11 +797,13 @@ impl ManagerActor {
          .ok_or(AirPodsError::AdapterNotFound)?;
 
       if adapter_info.state != AdapterState::Active {
+         debug_metrics().note_reconnect_result(false, "adapter_not_available");
          return Err(AirPodsError::AdapterNotAvailable);
       }
 
       // Only work with bluetooth-connected devices
       if device.bluetooth_state != BluetoothState::Connected {
+         debug_metrics().note_reconnect_result(false, "device_not_connected");
          return Err(AirPodsError::DeviceNotConnected);
       }
 
@@ -778,6 +812,7 @@ impl ManagerActor {
       if !bluer_device.is_paired().await.unwrap_or(false) {
          // Clean up on early exit
          self.aap_connecting.remove(&addr);
+         debug_metrics().note_reconnect_result(false, "device_not_paired");
          return Err(AirPodsError::DeviceNotPaired);
       }
 

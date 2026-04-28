@@ -219,7 +219,7 @@ impl AirPodsService {
    }
 
    #[zbus(property)]
-   async fn control_owner_details(&self) -> Option<String> {
-      media_control::control_owner_details_json()
+   async fn control_owner_details(&self) -> String {
+      media_control::control_owner_details_json().unwrap_or_default()
    }
 }

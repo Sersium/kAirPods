@@ -231,9 +231,10 @@ impl AirPods {
           "connected": self.is_connected(),
       });
 
-      if let Some(battery) = self.battery_info() {
-         info["battery"] = battery.to_json();
-      }
+      info["battery"] = self
+         .battery_info()
+         .map(BatteryInfo::to_json)
+         .unwrap_or_else(|| BatteryInfo::new().to_json());
 
       // Add battery TTL estimate
       info["battery_ttl_estimate"] = match self.estimate_battery_ttl() {

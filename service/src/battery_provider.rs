@@ -9,12 +9,7 @@ use std::collections::HashMap;
 
 use bluer::Address;
 use log::{debug, info, warn};
-use zbus::{
-   Connection, connection,
-   interface,
-   proxy,
-   zvariant::OwnedObjectPath,
-};
+use zbus::{Connection, connection, interface, proxy, zvariant::OwnedObjectPath};
 
 /// Root path where we expose our battery objects.
 const PROVIDER_ROOT: &str = "/org/kairpods/battery";
@@ -92,11 +87,7 @@ impl BatteryProvider {
    /// Returns `None` if the system bus is unavailable or BlueZ doesn't support
    /// `BatteryProviderManager1` (graceful degradation).
    pub async fn new() -> Option<Self> {
-      let connection = match connection::Builder::system()
-         .ok()?
-         .build()
-         .await
-      {
+      let connection = match connection::Builder::system().ok()?.build().await {
          Ok(conn) => conn,
          Err(e) => {
             warn!("Failed to connect to system D-Bus for battery provider: {e}");

@@ -130,8 +130,16 @@ impl AirPodsService {
       Ok(true)
    }
 
-   async fn set_auto_play_pause(&self, enabled: bool) -> fdo::Result<bool> {
+   async fn set_auto_play_pause(
+      &self,
+      enabled: bool,
+      #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+   ) -> fdo::Result<bool> {
       media_control::set_enabled(enabled);
+      if media_control::refresh_control_owner("set_auto_play_pause").await {
+         self.control_owner_changed(&emitter).await?;
+         self.control_owner_details_changed(&emitter).await?;
+      }
       info!("Auto play/pause set to {enabled}");
       Ok(true)
    }
@@ -203,5 +211,15 @@ impl AirPodsService {
    #[zbus(property)]
    async fn connected_count(&self) -> u32 {
       self.bluetooth_manager.count_devices().await
+   }
+
+   #[zbus(property)]
+   async fn control_owner(&self) -> String {
+      media_control::control_owner().to_string()
+   }
+
+   #[zbus(property)]
+   async fn control_owner_details(&self) -> Option<String> {
+      media_control::control_owner_details_json()
    }
 }

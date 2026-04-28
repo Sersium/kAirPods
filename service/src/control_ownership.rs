@@ -67,7 +67,7 @@ impl OwnershipPolicy {
    }
 
    pub fn update_from_local_playback(&mut self, is_playing: bool, now: Instant) {
-      self.snapshot.last_local_playing_at = if is_playing { Some(now) } else { None };
+      self.snapshot.last_local_playing_at = is_playing.then_some(now);
       self.reconcile(now);
    }
 
@@ -95,19 +95,19 @@ impl OwnershipPolicy {
 
    fn is_local_active(&self, now: Instant) -> bool {
       self.snapshot.last_local_playing_at.is_some_and(|at| {
-         now.duration_since(at) <= Duration::from_millis(self.config.local_active_ttl_ms)
+         now.checked_duration_since(at).is_some_and(|elapsed| {
+            elapsed <= Duration::from_millis(self.config.local_active_ttl_ms)
+         })
       })
    }
 
-   fn is_remote_active(&self, now: Instant) -> bool {
-      self.snapshot.last_remote_hint_at.is_some_and(|at| {
-         now.duration_since(at) <= Duration::from_millis(self.config.local_active_ttl_ms)
-      })
+   fn is_remote_active(&self) -> bool {
+      self.snapshot.last_remote_hint_at.is_some()
    }
 
    fn desired_owner(&self, now: Instant) -> (ControlOwner, &'static str) {
       let local_active = self.is_local_active(now);
-      let remote_active = self.is_remote_active(now);
+      let remote_active = self.is_remote_active();
 
       if self.config.prefer_local_when_playing && local_active {
          return (ControlOwner::Linux, "local playback active");
@@ -132,9 +132,10 @@ impl OwnershipPolicy {
       }
 
       let hysteresis = Duration::from_millis(self.config.hysteresis_ms);
-      let in_hysteresis_window = self
-         .last_owner_change_at
-         .is_some_and(|at| now.duration_since(at) < hysteresis);
+      let in_hysteresis_window = self.last_owner_change_at.is_some_and(|at| {
+         now.checked_duration_since(at)
+            .is_some_and(|elapsed| elapsed < hysteresis)
+      });
 
       if in_hysteresis_window {
          self.snapshot.reason = "hysteresis hold";

@@ -84,7 +84,10 @@ pub async fn send_pause() {
       return;
    }
 
-   let playing_players = list_playing_players().await;
+   // Pause decisions must be made from fresh state (not the short-lived cache),
+   // otherwise we can store stale players in `PAUSED_PLAYERS` and later resume
+   // media that was not actually playing when pause was requested.
+   let playing_players = list_playing_players_uncached().await;
    if playing_players.is_empty() {
       debug!("No playing players found to pause");
       return;

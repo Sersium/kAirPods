@@ -7,7 +7,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
-use log::{info, warn};
+use log::{debug, info, warn};
 use tokio::{signal, sync::Notify, task::JoinHandle, time};
 use zbus::{Connection, connection, object_server::InterfaceRef};
 
@@ -20,6 +20,7 @@ mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
+mod control_ownership;
 mod dbus;
 mod error;
 mod event;
@@ -136,6 +137,7 @@ struct EventProcessor {
    queue: SegQueue<(AirPods, AirPodsEvent)>,
    notifier: Notify,
    gesture_config: config::GestureConfig,
+   ownership_engine: control_ownership::OwnershipEngine,
 }
 
 impl EventProcessor {
@@ -144,6 +146,7 @@ impl EventProcessor {
          queue: SegQueue::new(),
          notifier: Notify::new(),
          gesture_config,
+         ownership_engine: control_ownership::OwnershipEngine::new(),
       })
    }
 }
@@ -255,6 +258,8 @@ impl EventProcessor {
             // Handle play/pause based on ear detection
             // Pause when at least one earbud is removed, play only when both are in
             let both_in_ear = ear_detection.is_left_in_ear() && ear_detection.is_right_in_ear();
+            self.ownership_engine.on_ear_detection(both_in_ear);
+
             if both_in_ear {
                // Both AirPods are in ear - send play command
                media_control::send_play().await;
@@ -276,9 +281,38 @@ impl EventProcessor {
             };
 
             match action {
-               GestureAction::PlayPause => media_control::send_play_pause().await,
-               GestureAction::Next => media_control::send_next().await,
-               GestureAction::Previous => media_control::send_previous().await,
+               GestureAction::PlayPause => {
+                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  match decision.owner {
+                     control_ownership::ControlOwner::Linux => {
+                        media_control::send_play_pause().await
+                     },
+                     control_ownership::ControlOwner::Remote => debug!(
+                        "Skipping local PlayPause: ownership is remote ({})",
+                        decision.reason
+                     ),
+                  }
+               },
+               GestureAction::Next => {
+                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  match decision.owner {
+                     control_ownership::ControlOwner::Linux => media_control::send_next().await,
+                     control_ownership::ControlOwner::Remote => debug!(
+                        "Skipping local Next: ownership is remote ({})",
+                        decision.reason
+                     ),
+                  }
+               },
+               GestureAction::Previous => {
+                  let decision = self.ownership_engine.decide_for_media_command().await;
+                  match decision.owner {
+                     control_ownership::ControlOwner::Linux => media_control::send_previous().await,
+                     control_ownership::ControlOwner::Remote => debug!(
+                        "Skipping local Previous: ownership is remote ({})",
+                        decision.reason
+                     ),
+                  }
+               },
                GestureAction::CycleNoiseMode => {
                   if let Some(current_mode) = device.noise_mode() {
                      let next_mode = device

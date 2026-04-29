@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use smol_str::SmolStr;
 
+#[cfg(feature = "experimental-aap-hints")]
+use crate::airpods::protocol::{RemoteControlHint, RoutingStateHint};
 use crate::airpods::{
    device::AirPods,
    protocol::{BatteryInfo, EarDetectionStatus, FeatureId, NoiseControlMode, StemPressEvent},
@@ -23,6 +25,10 @@ pub enum AirPodsEvent {
    NoiseControlChanged(NoiseControlMode),
    EarDetectionChanged(EarDetectionStatus),
    StemPressed(StemPressEvent),
+   #[cfg(feature = "experimental-aap-hints")]
+   RemoteControlHinted(RemoteControlHint),
+   #[cfg(feature = "experimental-aap-hints")]
+   RoutingStateHinted(RoutingStateHint),
    DeviceNameChanged(SmolStr),
    FeatureChanged(FeatureId, bool),
 }

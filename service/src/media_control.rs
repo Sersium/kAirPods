@@ -131,7 +131,9 @@ pub async fn list_playing_players() -> Vec<String> {
    }
 
    let players = list_playing_players_uncached().await;
-   set_cached_playing_players(players.clone(), Instant::now());
+   if !players.is_empty() {
+      set_cached_playing_players(players.clone(), Instant::now());
+   }
    players
 }
 
@@ -239,19 +241,28 @@ async fn find_first_mpris_player() -> Option<String> {
 }
 
 async fn discover_mpris_players() -> Vec<String> {
-   let Ok(connection) = Connection::session().await else {
-      warn!("Failed to connect to D-Bus session");
-      return Vec::new();
+   let connection = match Connection::session().await {
+      Ok(c) => c,
+      Err(e) => {
+         warn!("Failed to connect to D-Bus session: {e}");
+         return Vec::new();
+      },
    };
 
-   let Ok(dbus_proxy) = zbus::fdo::DBusProxy::new(&connection).await else {
-      warn!("Failed to create D-Bus proxy");
-      return Vec::new();
+   let dbus_proxy = match zbus::fdo::DBusProxy::new(&connection).await {
+      Ok(p) => p,
+      Err(e) => {
+         warn!("Failed to create D-Bus proxy: {e}");
+         return Vec::new();
+      },
    };
 
-   let Ok(names) = dbus_proxy.list_names().await else {
-      warn!("Failed to list D-Bus names");
-      return Vec::new();
+   let names = match dbus_proxy.list_names().await {
+      Ok(n) => n,
+      Err(e) => {
+         warn!("Failed to list D-Bus names: {e}");
+         return Vec::new();
+      },
    };
 
    names

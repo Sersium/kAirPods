@@ -5,6 +5,12 @@
 - **Object Path**: `/org/kairpods/manager`
 - **Interface**: `org.kairpods.manager`
 
+## Seamless Multipoint Notes
+
+- Assumes BlueZ DeviceID is already configured with Apple vendor identity on your system.
+- AirPods multipoint behavior is ownership-based: only one active playback owner is expected at a time.
+- During handoff, Linux-side D-Bus state may briefly disconnect/reconnect while the active owner changes.
+
 ## Using busctl
 
 ### List all methods and signals
@@ -85,6 +91,39 @@ busctl --user monitor org.kairpods
 # NoiseControlChanged: address="AA:BB:CC:DD:EE:FF" mode="anc"
 # DeviceConnected: address="AA:BB:CC:DD:EE:FF"
 ```
+
+## Quick Handoff Verification
+
+1. **Linux playing test**
+   ```bash
+   busctl --user get-property org.kairpods /org/kairpods/manager org.kairpods.manager ConnectedCount
+   ```
+   Start playback on Linux and verify `ConnectedCount` is non-zero.
+
+2. **iPhone playing test**
+   Keep `busctl --user monitor org.kairpods` running, then start playback on iPhone.
+   Confirm you observe ownership transition signals (`DeviceDisconnected` / `DeviceConnected`) as handoff occurs.
+
+3. **Case in/out reconnect test**
+   Put AirPods back in case, then take them out and reconnect.
+   Confirm `DeviceConnected` is emitted again and `GetDevices` returns fresh state.
+
+## Troubleshooting Handoff That Does Not Switch
+
+- Inspect service logs:
+  ```bash
+  journalctl --user -u kairpodsd.service -b --no-pager
+  ```
+- Inspect D-Bus in real time:
+  ```bash
+  busctl --user monitor org.kairpods
+  ```
+- Expected properties/signals during healthy switching:
+  - `ConnectedCount` changes with ownership transitions.
+  - `DeviceConnected` / `DeviceDisconnected` appear when links move.
+  - `GetDevice`/`GetDevices` remain queryable and return updated JSON state post-handoff.
+
+> ⚠️ Packet-level behavior can vary by AirPods generation and firmware; exact sequence/timing may differ.
 
 ## Using gdbus
 

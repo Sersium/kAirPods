@@ -5,7 +5,7 @@
 
 use std::{
    collections::{HashMap, HashSet},
-   time::Duration,
+   time::{Duration, Instant},
 };
 
 use bluer::{Adapter, AdapterEvent, Address, Session};
@@ -38,6 +38,14 @@ const ADAPTER_RECOVERY_DELAY: Duration = Duration::from_secs(5);
 const AAP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum AAP connection retry delay
 const MAX_AAP_RETRY_DELAY: Duration = Duration::from_secs(120);
+/// Fast reconnect delay when warm-reconnect heuristics match
+const WARM_AAP_RETRY_DELAY: Duration = Duration::from_millis(750);
+/// Window where an AAP drop is considered "recent"
+const RECENT_AAP_DISCONNECT_WINDOW: Duration = Duration::from_secs(20);
+/// Window where ear/case activity is considered a recent cycle
+const RECENT_CASE_CYCLE_WINDOW: Duration = Duration::from_secs(45);
+/// Number of quick retries before falling back to exponential backoff
+const WARM_RECONNECT_MAX_RETRIES: u32 = 2;
 /// Device tick interval
 const DEVICE_TICK_INTERVAL: Duration = Duration::from_secs(10);
 /// Channel buffer size
@@ -85,6 +93,9 @@ struct ManagedDevice {
    aap_retry_count: u32,
    last_aap_error: Option<String>,
    aap_handle: Option<JoinHandle<()>>,
+   last_seen_connected_at: Option<Instant>,
+   last_aap_disconnect_at: Option<Instant>,
+   recent_case_cycle: Option<Instant>,
 }
 
 // === Commands ===
@@ -643,6 +654,9 @@ impl ManagerActor {
          aap_retry_count: 0,
          last_aap_error: None,
          aap_handle: None,
+         last_seen_connected_at: Some(Instant::now()),
+         last_aap_disconnect_at: None,
+         recent_case_cycle: None,
       };
 
       self.devices.insert(addr, managed);
@@ -654,7 +668,13 @@ impl ManagerActor {
    async fn handle_bluetooth_connected(&mut self, addr: Address) {
       // Check if this is an AirPods device
       let is_airpods = if let Some(device) = self.devices.get_mut(&addr) {
+         let was_disconnected = device.bluetooth_state == BluetoothState::Disconnected;
          device.bluetooth_state = BluetoothState::Connected;
+         let now = Instant::now();
+         device.last_seen_connected_at = Some(now);
+         if was_disconnected {
+            device.recent_case_cycle = Some(now);
+         }
          true
       } else {
          // Check if this is a newly connected AirPods
@@ -702,6 +722,7 @@ impl ManagerActor {
          device.aap_state = AAPState::Connected;
          device.aap_retry_count = 0;
          device.last_aap_error = None;
+         device.recent_case_cycle = None;
 
          self
             .event_tx
@@ -713,15 +734,35 @@ impl ManagerActor {
 
    fn handle_aap_disconnected(&mut self, addr: Address, is_error: bool) {
       if let Some(device) = self.devices.get_mut(&addr) {
+         let now = Instant::now();
+         device.last_aap_disconnect_at = Some(now);
+
          if is_error && device.bluetooth_state == BluetoothState::Connected {
             // Only retry AAP if Bluetooth is still connected
             device.aap_state = AAPState::WaitingToReconnect;
             device.aap_retry_count += 1;
+            if device.recent_case_cycle.is_none() {
+               device.recent_case_cycle = Some(now);
+            }
 
-            // Schedule AAP reconnection with backoff
+            let should_warm_reconnect = Self::should_use_warm_reconnect(device, now);
             let loopback = self.loopback_tx.clone();
-            let delay = calc_retry_delay(device.aap_retry_count);
-            info!("AAP connection to {addr} failed, retrying in {delay:?}");
+            let delay = if should_warm_reconnect {
+               WARM_AAP_RETRY_DELAY
+            } else {
+               calc_retry_delay(device.aap_retry_count)
+            };
+            if should_warm_reconnect {
+               info!(
+                  "AAP warm reconnect for {addr} in {delay:?} (retry #{}, bluetooth still connected, recent drop + case-cycle heuristic)",
+                  device.aap_retry_count
+               );
+            } else {
+               info!(
+                  "AAP backoff reconnect for {addr} in {delay:?} (retry #{})",
+                  device.aap_retry_count
+               );
+            }
 
             tokio::spawn(async move {
                time::sleep(delay).await;
@@ -900,6 +941,7 @@ impl ManagerActor {
    }
 
    async fn scan_for_connected_airpods(&self) {
+      let now = Instant::now();
       for adapter_info in self.adapters.values() {
          if adapter_info.state != AdapterState::Active {
             continue;
@@ -913,18 +955,51 @@ impl ManagerActor {
                   && self.is_airpods_device(&device).await
                   && !self.has_aap_connection(addr)
                {
-                  // Found connected AirPods without AAP connection
-                  let _ = self
-                     .loopback_tx
-                     .send(ManagerCommand::DeviceDiscovered(
-                        addr,
-                        adapter_info.name.clone(),
-                     ))
-                     .await;
+                  if self.devices.contains_key(&addr) {
+                     if let Some(managed) = self.devices.get(&addr)
+                        && Self::should_use_warm_reconnect(managed, now)
+                     {
+                        info!(
+                           "Prioritizing warm AAP reconnect from scan loop for {addr} (bluetooth connected + recent drop/case-cycle)"
+                        );
+                        let _ = self
+                           .loopback_tx
+                           .send(ManagerCommand::EstablishAAP(addr, None))
+                           .await;
+                     }
+                  } else {
+                     // Found connected AirPods without AAP connection
+                     let _ = self
+                        .loopback_tx
+                        .send(ManagerCommand::DeviceDiscovered(
+                           addr,
+                           adapter_info.name.clone(),
+                        ))
+                        .await;
+                  }
                }
             }
          }
       }
+   }
+
+   fn should_use_warm_reconnect(device: &ManagedDevice, now: Instant) -> bool {
+      if device.bluetooth_state != BluetoothState::Connected {
+         return false;
+      }
+
+      if device.aap_retry_count > WARM_RECONNECT_MAX_RETRIES {
+         return false;
+      }
+
+      let dropped_recently = device
+         .last_aap_disconnect_at
+         .is_some_and(|ts| now.duration_since(ts) <= RECENT_AAP_DISCONNECT_WINDOW);
+      let recent_case_cycle = device
+         .recent_case_cycle
+         .is_some_and(|ts| now.duration_since(ts) <= RECENT_CASE_CYCLE_WINDOW);
+
+      dropped_recently && recent_case_cycle
    }
 
    fn has_aap_connection(&self, addr: Address) -> bool {

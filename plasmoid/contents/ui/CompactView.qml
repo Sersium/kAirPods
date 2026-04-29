@@ -17,12 +17,22 @@ Item {
         var count = 0
         var total = 0
 
-        if (device.battery.left != null) {
-            total += device.battery.left
+        if (device.battery.headphone != null) {
+            total += device.battery.headphone.level ?? 0
             count++
+        } else {
+            if (device.battery.left != null) {
+                total += device.battery.left.level ?? 0
+                count++
+            }
+            if (device.battery.right != null) {
+                total += device.battery.right.level ?? 0
+                count++
+            }
         }
-        if (device.battery.right != null) {
-            total += device.battery.right
+
+        if (device.battery.case != null) {
+            total += device.battery.case.level ?? 0
             count++
         }
 
@@ -116,6 +126,17 @@ Item {
                         font.bold: true
                         color: "white"
                         z: 2
+                    }
+
+                    Kirigami.Icon {
+                        visible: !!device?.battery?.case?.charging
+                        anchors.left: parent.right
+                        anchors.leftMargin: -Kirigami.Units.smallSpacing
+                        anchors.verticalCenter: parent.verticalCenter
+                        source: "battery-charging-symbolic"
+                        width: Kirigami.Units.iconSizes.small
+                        height: width
+                        color: "#4CAF50"
                     }
                 }
             }

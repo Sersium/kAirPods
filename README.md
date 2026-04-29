@@ -191,7 +191,13 @@ If your AirPods connect but battery information is missing, enable debug logging
 1. **Create config file**:
    ```bash
    mkdir -p ~/.config/kairpods
-   echo 'log_filter = "debug"' > ~/.config/kairpods/config.toml
+   cat > ~/.config/kairpods/config.toml <<'EOF'
+   log_filter = "debug"
+   multipoint_seamless_enabled = true
+   local_active_ttl_ms = 5000
+   owner_hysteresis_ms = 1200
+   prefer_local_when_playing = true
+   EOF
    ```
 
 2. **Restart the service**:
@@ -214,6 +220,9 @@ Common causes for missing battery info:
 - BlueZ experimental features not enabled (installer handles this automatically)
 - Enhanced Retransmission Mode (ERTM) disabled
 - Outdated BlueZ version (need ≥ 5.50)
+
+> Existing config files remain compatible. Any missing keys are automatically
+> filled with defaults when loaded.
 </details>
 
 ---

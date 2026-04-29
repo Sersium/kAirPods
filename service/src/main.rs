@@ -104,7 +104,14 @@ async fn main() -> Result<()> {
    };
 
    // Create Bluetooth manager with event sender and config
-   let bluetooth_manager = BluetoothManager::new(event_bus.clone(), config, battery_study).await?;
+   let ownership_engine = bluetooth::manager::OwnershipEngineConfig {
+      multipoint_seamless_enabled: config.multipoint_seamless_enabled,
+      local_active_ttl_ms: config.local_active_ttl_ms,
+      owner_hysteresis_ms: config.owner_hysteresis_ms,
+      prefer_local_when_playing: config.prefer_local_when_playing,
+   };
+   let bluetooth_manager =
+      BluetoothManager::new(event_bus.clone(), config, ownership_engine, battery_study).await?;
 
    // Create D-Bus service
    let service = AirPodsService::new(bluetooth_manager);

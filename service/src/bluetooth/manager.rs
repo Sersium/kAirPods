@@ -28,6 +28,14 @@ use crate::{
 };
 use rand::Rng;
 
+#[derive(Debug, Clone, Copy)]
+pub struct OwnershipEngineConfig {
+   pub multipoint_seamless_enabled: bool,
+   pub local_active_ttl_ms: u64,
+   pub owner_hysteresis_ms: u64,
+   pub prefer_local_when_playing: bool,
+}
+
 /// Interval to poll for new devices and check connection health
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Interval to check for new adapters
@@ -126,13 +134,20 @@ impl BluetoothManager {
    pub async fn new(
       event_tx: EventSender,
       config: Config,
+      ownership_engine: OwnershipEngineConfig,
       battery_study: Option<BatteryStudy>,
    ) -> Result<Self> {
       let (command_tx, command_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
       tokio::spawn(
-         ManagerActor::new(config, event_tx, command_rx, battery_study)
-            .await
-            .run(),
+         ManagerActor::new(
+            config,
+            ownership_engine,
+            event_tx,
+            command_rx,
+            battery_study,
+         )
+         .await
+         .run(),
       );
       Ok(Self { inbox: command_tx })
    }
@@ -202,6 +217,7 @@ impl BluetoothManager {
 
 struct ManagerActor {
    config: Config,
+   ownership_engine: OwnershipEngineConfig,
    event_tx: EventSender,
    command_rx: mpsc::Receiver<ManagerCommand>,
    loopback_rx: mpsc::Receiver<ManagerCommand>,
@@ -218,6 +234,7 @@ struct ManagerActor {
 impl ManagerActor {
    async fn new(
       config: Config,
+      ownership_engine: OwnershipEngineConfig,
       event_tx: EventSender,
       command_rx: mpsc::Receiver<ManagerCommand>,
       battery_study: Option<BatteryStudy>,
@@ -229,6 +246,7 @@ impl ManagerActor {
       let (loopback_tx, loopback_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
       Self {
          config,
+         ownership_engine,
          event_tx,
          command_rx,
          loopback_rx,
@@ -243,6 +261,13 @@ impl ManagerActor {
 
    async fn run(mut self) {
       info!("Bluetooth manager starting up");
+      debug!(
+         "Ownership engine config: multipoint_seamless_enabled={}, local_active_ttl_ms={}, owner_hysteresis_ms={}, prefer_local_when_playing={}",
+         self.ownership_engine.multipoint_seamless_enabled,
+         self.ownership_engine.local_active_ttl_ms,
+         self.ownership_engine.owner_hysteresis_ms,
+         self.ownership_engine.prefer_local_when_playing
+      );
 
       // Initialize adapters
       self.initialize_adapters().await;

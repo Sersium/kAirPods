@@ -279,7 +279,10 @@ impl AirPods {
 
    /// Sets whether stem gesture interception via AAP is enabled.
    pub fn set_stem_gestures_enabled(&self, enabled: bool) {
-      self.0.stem_gestures_enabled.store(enabled, Ordering::Relaxed);
+      self
+         .0
+         .stem_gestures_enabled
+         .store(enabled, Ordering::Relaxed);
    }
 
    /// Establishes an L2CAP connection to the `AirPods` device.

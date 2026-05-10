@@ -89,6 +89,21 @@ This will build and install all components automatically.
    - Search for "kAirPods"
    - Drag to panel
 
+## Configuration
+
+Create `~/.config/kairpods/config.toml` to override defaults:
+
+```toml
+log_filter = "info"
+multipoint_seamless_enabled = true
+local_active_ttl_ms = 5000
+owner_hysteresis_ms = 1200
+prefer_local_when_playing = true
+```
+
+Missing keys are backfilled from built-in defaults, so older config files
+continue to work.
+
 ## Troubleshooting
 
 ### Service fails to start

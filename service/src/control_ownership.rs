@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlOwner {
    Linux,
@@ -39,6 +41,18 @@ impl Default for OwnershipConfig {
          remote_active_ttl_ms: 5_000,
          hysteresis_ms: 1_000,
          prefer_local_when_playing: true,
+      }
+   }
+}
+
+impl From<&Config> for OwnershipConfig {
+   fn from(cfg: &Config) -> Self {
+      Self {
+         enabled: cfg.multipoint_seamless_enabled,
+         local_active_ttl_ms: cfg.local_active_ttl_ms,
+         remote_active_ttl_ms: 5_000,
+         hysteresis_ms: cfg.owner_hysteresis_ms,
+         prefer_local_when_playing: cfg.prefer_local_when_playing,
       }
    }
 }

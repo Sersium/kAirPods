@@ -89,7 +89,8 @@ async fn main() -> Result<()> {
    }
 
    // Create event channel
-   let event_bus = EventProcessor::new(config.gestures.clone());
+   let ownership_config = control_ownership::OwnershipConfig::from(&config);
+   let event_bus = EventProcessor::new(config.gestures.clone(), ownership_config);
 
    // Initialize battery study database
    let battery_study = match battery_study::BatteryStudy::open() {
@@ -147,12 +148,15 @@ struct EventProcessor {
 }
 
 impl EventProcessor {
-   fn new(gesture_config: config::GestureConfig) -> Arc<Self> {
+   fn new(
+      gesture_config: config::GestureConfig,
+      ownership_config: control_ownership::OwnershipConfig,
+   ) -> Arc<Self> {
       Arc::new(Self {
          queue: SegQueue::new(),
          notifier: Notify::new(),
          gesture_config,
-         ownership_policy: Mutex::new(control_ownership::OwnershipPolicy::new(Default::default())),
+         ownership_policy: Mutex::new(control_ownership::OwnershipPolicy::new(ownership_config)),
       })
    }
 }

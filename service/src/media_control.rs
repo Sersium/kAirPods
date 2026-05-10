@@ -162,7 +162,10 @@ fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
       return None;
    };
 
-   if now.duration_since(cache.updated_at) <= PLAYING_PLAYERS_CACHE_TTL {
+   if now
+      .checked_duration_since(cache.updated_at)
+      .is_some_and(|elapsed| elapsed <= PLAYING_PLAYERS_CACHE_TTL)
+   {
       return Some(cache.players.clone());
    }
    None

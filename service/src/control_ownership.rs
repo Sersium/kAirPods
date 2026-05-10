@@ -50,7 +50,7 @@ impl From<&Config> for OwnershipConfig {
       Self {
          enabled: cfg.multipoint_seamless_enabled,
          local_active_ttl_ms: cfg.local_active_ttl_ms,
-         remote_active_ttl_ms: Self::default().remote_active_ttl_ms,
+         remote_active_ttl_ms: 5_000,
          hysteresis_ms: cfg.owner_hysteresis_ms,
          prefer_local_when_playing: cfg.prefer_local_when_playing,
       }

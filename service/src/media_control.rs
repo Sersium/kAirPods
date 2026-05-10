@@ -11,6 +11,7 @@ use std::{
 use log::{debug, warn};
 use parking_lot::Mutex;
 use serde::Serialize;
+use tokio::sync::OnceCell;
 use zbus::Connection;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -18,6 +19,9 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static CONTROL_OWNER: Mutex<ControlOwnerState> = Mutex::new(ControlOwnerState::new());
+
+/// Cached session-bus connection reused across ownership refresh calls.
+static SESSION_BUS: OnceCell<Connection> = OnceCell::const_new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlOwner {
@@ -52,7 +56,7 @@ struct ControlOwnerState {
 }
 
 impl ControlOwnerState {
-   fn new() -> Self {
+   const fn new() -> Self {
       Self {
          owner: ControlOwner::Unknown,
          details: None,
@@ -69,33 +73,18 @@ fn now_ms() -> u64 {
 fn update_control_owner(owner: ControlOwner, reason: String, confidence: f32) -> bool {
    let now = now_ms();
    let mut state = CONTROL_OWNER.lock();
-   let transitioned = state.owner != owner;
-   let owner_since_ms = if transitioned {
-      now
-   } else {
-      state
-         .details
-         .as_ref()
-         .map_or(now, |details| details.owner_since_ms)
-   };
-   let last_transition_ms = if transitioned {
-      now
-   } else {
-      state
-         .details
-         .as_ref()
-         .map_or(now, |details| details.last_transition_ms)
-   };
-
+   if state.owner == owner {
+      return false;
+   }
    state.owner = owner;
    state.details = Some(ControlOwnerDetails {
       reason,
       observed_at_ms: now,
-      owner_since_ms,
-      last_transition_ms,
+      owner_since_ms: now,
+      last_transition_ms: now,
       confidence,
    });
-   transitioned
+   true
 }
 
 pub fn control_owner() -> &'static str {
@@ -103,12 +92,26 @@ pub fn control_owner() -> &'static str {
 }
 
 pub fn control_owner_details_json() -> Option<String> {
-   let details = CONTROL_OWNER.lock().details.clone()?;
-   serde_json::to_string(&details).ok()
+   let mut details = CONTROL_OWNER.lock().details.clone()?;
+   if !details.confidence.is_finite() {
+      details.confidence = 0.0;
+   }
+   match serde_json::to_string(&details) {
+      Ok(json) => Some(json),
+      Err(e) => {
+         warn!("Failed to serialize control_owner_details, returning None: {e}");
+         None
+      },
+   }
+}
+
+/// Returns the cached session-bus connection, creating it on first call.
+async fn session_bus() -> Option<&'static Connection> {
+   SESSION_BUS.get_or_try_init(Connection::session).await.ok()
 }
 
 pub async fn refresh_control_owner(reason: &str) -> bool {
-   let Ok(connection) = Connection::session().await else {
+   let Some(connection) = session_bus().await else {
       return update_control_owner(
          ControlOwner::Unknown,
          format!("{reason}: session bus unavailable"),
@@ -116,7 +119,7 @@ pub async fn refresh_control_owner(reason: &str) -> bool {
       );
    };
 
-   let dbus_proxy = match zbus::fdo::DBusProxy::new(&connection).await {
+   let dbus_proxy = match zbus::fdo::DBusProxy::new(connection).await {
       Ok(proxy) => proxy,
       Err(e) => {
          return update_control_owner(

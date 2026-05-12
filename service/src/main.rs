@@ -4,10 +4,14 @@
 //! in KDE Plasma, including battery monitoring, noise control, and
 //! feature management.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+   sync::Arc,
+   time::{Duration, Instant},
+};
 
 use crossbeam::queue::SegQueue;
-use log::{info, warn};
+use log::{debug, info, warn};
+use parking_lot::Mutex;
 use tokio::{signal, sync::Notify, task::JoinHandle, time};
 use zbus::{Connection, connection, object_server::InterfaceRef};
 
@@ -20,6 +24,9 @@ mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
+// Remote-hint integration not yet wired; suppress dead_code for those APIs.
+#[allow(dead_code)]
+mod control_ownership;
 mod dbus;
 mod error;
 mod event;
@@ -82,7 +89,8 @@ async fn main() -> Result<()> {
    }
 
    // Create event channel
-   let event_bus = EventProcessor::new(config.gestures.clone());
+   let ownership_config = control_ownership::OwnershipConfig::from(&config);
+   let event_bus = EventProcessor::new(config.gestures.clone(), ownership_config);
 
    // Initialize battery study database
    let battery_study = match battery_study::BatteryStudy::open() {
@@ -136,14 +144,19 @@ struct EventProcessor {
    queue: SegQueue<(AirPods, AirPodsEvent)>,
    notifier: Notify,
    gesture_config: config::GestureConfig,
+   ownership_policy: Mutex<control_ownership::OwnershipPolicy>,
 }
 
 impl EventProcessor {
-   fn new(gesture_config: config::GestureConfig) -> Arc<Self> {
+   fn new(
+      gesture_config: config::GestureConfig,
+      ownership_config: control_ownership::OwnershipConfig,
+   ) -> Arc<Self> {
       Arc::new(Self {
          queue: SegQueue::new(),
          notifier: Notify::new(),
          gesture_config,
+         ownership_policy: Mutex::new(control_ownership::OwnershipPolicy::new(ownership_config)),
       })
    }
 }
@@ -276,6 +289,10 @@ impl EventProcessor {
             // Handle play/pause based on ear detection
             // Pause when at least one earbud is removed, play only when both are in
             let both_in_ear = ear_detection.is_left_in_ear() && ear_detection.is_right_in_ear();
+            self
+               .ownership_policy
+               .lock()
+               .update_from_local_playback(both_in_ear, Instant::now());
             if both_in_ear {
                // Both AirPods are in ear - send play command
                media_control::send_play().await;
@@ -298,9 +315,39 @@ impl EventProcessor {
             };
 
             match action {
-               GestureAction::PlayPause => media_control::send_play_pause().await,
-               GestureAction::Next => media_control::send_next().await,
-               GestureAction::Previous => media_control::send_previous().await,
+               GestureAction::PlayPause => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_play_pause().await
+                  } else {
+                     debug!("Skipping local PlayPause: remote has media ownership")
+                  }
+               },
+               GestureAction::Next => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_next().await
+                  } else {
+                     debug!("Skipping local Next: remote has media ownership")
+                  }
+               },
+               GestureAction::Previous => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_previous().await
+                  } else {
+                     debug!("Skipping local Previous: remote has media ownership")
+                  }
+               },
                GestureAction::CycleNoiseMode => {
                   if let Some(current_mode) = device.noise_mode() {
                      let next_mode = device
@@ -328,7 +375,6 @@ impl EventProcessor {
                },
                GestureAction::None => {},
             }
-            Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
          },
          AirPodsEvent::DeviceNameChanged(name) => {
             iface.device_name_changed(addr_str, &name).await?;

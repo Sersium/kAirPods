@@ -18,6 +18,8 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+// Playing-players cache: used by `any_local_player_playing` and `list_playing_players`
+// which will be called by the ownership-policy integration once fully wired.
 #[allow(dead_code)]
 static PLAYING_PLAYERS_CACHE: Mutex<Option<PlayingPlayersCache>> = Mutex::new(None);
 #[allow(dead_code)]

@@ -18,13 +18,16 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[allow(dead_code)]
 static PLAYING_PLAYERS_CACHE: Mutex<Option<PlayingPlayersCache>> = Mutex::new(None);
+#[allow(dead_code)]
 const PLAYING_PLAYERS_CACHE_TTL: Duration = Duration::from_millis(300);
 static CONTROL_OWNER: Mutex<ControlOwnerState> = Mutex::new(ControlOwnerState::new());
 
 /// Cached session-bus connection reused across ownership refresh calls.
 static SESSION_BUS: OnceCell<Connection> = OnceCell::const_new();
 
+#[allow(dead_code)]
 struct PlayingPlayersCache {
    updated_at: Instant,
    players: Vec<String>,
@@ -283,10 +286,12 @@ pub async fn send_pause() {
    }
 }
 
+#[allow(dead_code)]
 pub async fn any_local_player_playing() -> bool {
    !list_playing_players().await.is_empty()
 }
 
+#[allow(dead_code)]
 pub async fn list_playing_players() -> Vec<String> {
    if let Some(cached_players) = get_cached_playing_players(Instant::now()) {
       return cached_players;
@@ -318,6 +323,7 @@ async fn list_playing_players_uncached() -> Vec<String> {
    playing_players
 }
 
+#[allow(dead_code)]
 fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
    let cache = PLAYING_PLAYERS_CACHE.lock();
    let cache = cache.as_ref()?;
@@ -331,6 +337,7 @@ fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
    None
 }
 
+#[allow(dead_code)]
 fn set_cached_playing_players(players: Vec<String>, now: Instant) {
    *PLAYING_PLAYERS_CACHE.lock() = Some(PlayingPlayersCache {
       updated_at: now,

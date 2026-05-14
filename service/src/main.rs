@@ -375,6 +375,7 @@ impl EventProcessor {
                },
                GestureAction::None => {},
             }
+            Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
          },
          AirPodsEvent::DeviceNameChanged(name) => {
             iface.device_name_changed(addr_str, &name).await?;

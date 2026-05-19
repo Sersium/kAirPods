@@ -468,10 +468,10 @@ impl AirPods {
          let packet = build_control_packet(0x0D, (mode as u32).to_le_bytes());
          conn.sender.send(&packet).await?;
          let prev = self.0.noise_mode.swap(Some(mode));
-         if let Some(prev) = prev {
-            if prev != mode {
-               self.0.prev_noise_mode.store(Some(prev));
-            }
+         if let Some(prev) = prev
+            && prev != mode
+         {
+            self.0.prev_noise_mode.store(Some(prev));
          }
          Ok(())
       } else {

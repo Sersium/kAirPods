@@ -162,6 +162,25 @@ impl EventProcessor {
 }
 
 impl EventProcessor {
+   async fn refresh_control_owner_properties(
+      iface: &InterfaceRef<AirPodsService>,
+      reason: &str,
+   ) -> Result<()> {
+      if media_control::refresh_control_owner(reason).await {
+         iface
+            .get_mut()
+            .await
+            .control_owner_changed(iface.signal_emitter())
+            .await?;
+         iface
+            .get_mut()
+            .await
+            .control_owner_details_changed(iface.signal_emitter())
+            .await?;
+      }
+      Ok(())
+   }
+
    async fn recv(self: &Arc<Self>) -> Option<(AirPods, AirPodsEvent)> {
       loop {
          if let Some(event) = self.queue.pop() {
@@ -199,6 +218,7 @@ impl EventProcessor {
                .await
                .connected_count_changed(iface.signal_emitter())
                .await?;
+            Self::refresh_control_owner_properties(iface, "device_connected").await?;
          },
          AirPodsEvent::DeviceDisconnected => {
             iface.device_disconnected(addr_str).await?;
@@ -217,6 +237,7 @@ impl EventProcessor {
                .await
                .connected_count_changed(iface.signal_emitter())
                .await?;
+            Self::refresh_control_owner_properties(iface, "device_disconnected").await?;
          },
          AirPodsEvent::BatteryUpdated(battery) => {
             iface
@@ -279,6 +300,7 @@ impl EventProcessor {
                // At least one AirPod is out of ear - send pause command
                media_control::send_pause().await;
             }
+            Self::refresh_control_owner_properties(iface, "ear_detection").await?;
          },
          AirPodsEvent::StemPressed(stem_event) => {
             iface
@@ -353,6 +375,7 @@ impl EventProcessor {
                },
                GestureAction::None => {},
             }
+            Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
          },
          AirPodsEvent::DeviceNameChanged(name) => {
             iface.device_name_changed(addr_str, &name).await?;

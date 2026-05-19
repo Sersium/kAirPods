@@ -3,23 +3,190 @@
 //! This module provides functionality to control media playback using the
 //! MPRIS (Media Player Remote Interfacing Specification) D-Bus interface.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+   sync::atomic::{AtomicBool, Ordering},
+   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use log::{debug, warn};
 use parking_lot::Mutex;
+use serde::Serialize;
+use tokio::sync::OnceCell;
 use zbus::Connection;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Tracks which players we paused (so we can resume all of them)
 static PAUSED_PLAYERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+// Playing-players cache: used by `any_local_player_playing` and `list_playing_players`
+// which will be called by the ownership-policy integration once fully wired.
+#[allow(dead_code)]
 static PLAYING_PLAYERS_CACHE: Mutex<Option<PlayingPlayersCache>> = Mutex::new(None);
+#[allow(dead_code)]
 const PLAYING_PLAYERS_CACHE_TTL: Duration = Duration::from_millis(300);
+static CONTROL_OWNER: Mutex<ControlOwnerState> = Mutex::new(ControlOwnerState::new());
 
+/// Cached session-bus connection reused across ownership refresh calls.
+static SESSION_BUS: OnceCell<Connection> = OnceCell::const_new();
+
+#[allow(dead_code)]
 struct PlayingPlayersCache {
    updated_at: Instant,
    players: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlOwner {
+   Linux,
+   Remote,
+   Unknown,
+}
+
+impl ControlOwner {
+   pub const fn as_str(self) -> &'static str {
+      match self {
+         Self::Linux => "linux",
+         Self::Remote => "remote",
+         Self::Unknown => "unknown",
+      }
+   }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ControlOwnerDetails {
+   pub reason: String,
+   pub observed_at_ms: u64,
+   pub owner_since_ms: u64,
+   pub last_transition_ms: u64,
+   pub confidence: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ControlOwnerState {
+   owner: ControlOwner,
+   details: Option<ControlOwnerDetails>,
+}
+
+impl ControlOwnerState {
+   const fn new() -> Self {
+      Self {
+         owner: ControlOwner::Unknown,
+         details: None,
+      }
+   }
+}
+
+fn now_ms() -> u64 {
+   SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn update_control_owner(owner: ControlOwner, reason: String, confidence: f32) -> bool {
+   let now = now_ms();
+   let mut state = CONTROL_OWNER.lock();
+   if state.owner == owner {
+      return false;
+   }
+   state.owner = owner;
+   state.details = Some(ControlOwnerDetails {
+      reason,
+      observed_at_ms: now,
+      owner_since_ms: now,
+      last_transition_ms: now,
+      confidence,
+   });
+   true
+}
+
+pub fn control_owner() -> &'static str {
+   CONTROL_OWNER.lock().owner.as_str()
+}
+
+pub fn control_owner_details_json() -> Option<String> {
+   let mut details = CONTROL_OWNER.lock().details.clone()?;
+   if !details.confidence.is_finite() {
+      details.confidence = 0.0;
+   }
+   match serde_json::to_string(&details) {
+      Ok(json) => Some(json),
+      Err(e) => {
+         warn!("Failed to serialize control_owner_details, returning None: {e}");
+         None
+      },
+   }
+}
+
+/// Returns the cached session-bus connection, creating it on first call.
+async fn session_bus() -> Option<&'static Connection> {
+   SESSION_BUS.get_or_try_init(Connection::session).await.ok()
+}
+
+pub async fn refresh_control_owner(reason: &str) -> bool {
+   let Some(connection) = session_bus().await else {
+      return update_control_owner(
+         ControlOwner::Unknown,
+         format!("{reason}: session bus unavailable"),
+         0.2,
+      );
+   };
+
+   let dbus_proxy = match zbus::fdo::DBusProxy::new(connection).await {
+      Ok(proxy) => proxy,
+      Err(e) => {
+         return update_control_owner(
+            ControlOwner::Unknown,
+            format!("{reason}: dbus proxy failed: {e}"),
+            0.2,
+         );
+      },
+   };
+
+   let names = match dbus_proxy.list_names().await {
+      Ok(names) => names,
+      Err(e) => {
+         return update_control_owner(
+            ControlOwner::Unknown,
+            format!("{reason}: list_names failed: {e}"),
+            0.2,
+         );
+      },
+   };
+
+   let mut has_local_mpris = false;
+   let mut has_kdeconnect_mpris = false;
+   for name in names {
+      let name_str = name.as_str();
+      if !name_str.starts_with("org.mpris.MediaPlayer2.") {
+         continue;
+      }
+      if name_str.contains("kdeconnect") || name_str.contains("KDEConnect") {
+         has_kdeconnect_mpris = true;
+      } else {
+         has_local_mpris = true;
+      }
+   }
+
+   if has_local_mpris {
+      return update_control_owner(
+         ControlOwner::Linux,
+         format!("{reason}: local mpris players present"),
+         0.9,
+      );
+   }
+   if has_kdeconnect_mpris {
+      return update_control_owner(
+         ControlOwner::Remote,
+         format!("{reason}: only kdeconnect mpris players present"),
+         0.75,
+      );
+   }
+
+   update_control_owner(
+      ControlOwner::Unknown,
+      format!("{reason}: no mpris players detected"),
+      0.3,
+   )
 }
 
 pub fn set_enabled(enabled: bool) {
@@ -121,10 +288,12 @@ pub async fn send_pause() {
    }
 }
 
+#[allow(dead_code)]
 pub async fn any_local_player_playing() -> bool {
    !list_playing_players().await.is_empty()
 }
 
+#[allow(dead_code)]
 pub async fn list_playing_players() -> Vec<String> {
    if let Some(cached_players) = get_cached_playing_players(Instant::now()) {
       return cached_players;
@@ -156,11 +325,10 @@ async fn list_playing_players_uncached() -> Vec<String> {
    playing_players
 }
 
+#[allow(dead_code)]
 fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
    let cache = PLAYING_PLAYERS_CACHE.lock();
-   let Some(cache) = cache.as_ref() else {
-      return None;
-   };
+   let cache = cache.as_ref()?;
 
    if now
       .checked_duration_since(cache.updated_at)
@@ -171,6 +339,7 @@ fn get_cached_playing_players(now: Instant) -> Option<Vec<String>> {
    None
 }
 
+#[allow(dead_code)]
 fn set_cached_playing_players(players: Vec<String>, now: Instant) {
    *PLAYING_PLAYERS_CACHE.lock() = Some(PlayingPlayersCache {
       updated_at: now,

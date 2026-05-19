@@ -37,6 +37,14 @@ pub const PKT_STEM_CONFIG: &[u8] = &[
 pub const HDR_BATTERY_STATE: &[u8] = b"\x04\x00\x04\x00\x04\x00";
 pub const HDR_NOISE_CTL: &[u8] = b"\x04\x00\x04\x00\x09\x00\x0D";
 pub const HDR_CMD_CTL: &[u8] = b"\x04\x00\x04\x00\x09\x00";
+/// Candidate AAP frame observed in community captures that appears to carry
+/// remote-control handoff hints. Packet ID is not yet validated.
+#[cfg(feature = "experimental-aap-hints")]
+pub const HDR_REMOTE_CONTROL_HINT: &[u8] = b"\x04\x00\x04\x00\x09\x00\x2f";
+/// Candidate AAP frame observed in community captures that appears to carry
+/// command-routing state hints. Packet ID is not yet validated.
+#[cfg(feature = "experimental-aap-hints")]
+pub const HDR_ROUTING_STATE_HINT: &[u8] = b"\x04\x00\x04\x00\x09\x00\x30";
 
 // ACK packet headers
 pub const HDR_ACK_HANDSHAKE: &[u8] = b"\x01\x00\x04\x00";
@@ -577,6 +585,26 @@ impl StemPressEvent {
           "side": self.side.to_str(),
       })
    }
+}
+
+/// Candidate remote-control handoff hint from an unverified AAP packet ID.
+#[cfg(feature = "experimental-aap-hints")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteControlHint {
+   /// Raw selector byte captured from packet payload.
+   pub selector: u8,
+   /// Raw state byte captured from packet payload.
+   pub state: u8,
+}
+
+/// Candidate command-routing state hint from an unverified AAP packet ID.
+#[cfg(feature = "experimental-aap-hints")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingStateHint {
+   /// Raw route byte captured from packet payload.
+   pub route: u8,
+   /// Raw detail byte captured from packet payload.
+   pub detail: u8,
 }
 
 /// Builds a control packet for sending commands to `AirPods`.

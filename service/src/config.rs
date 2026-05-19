@@ -33,6 +33,18 @@ pub struct Config {
 
    #[serde(default)]
    pub gestures: GestureConfig,
+
+   #[serde(default = "default_multipoint_seamless_enabled")]
+   pub multipoint_seamless_enabled: bool,
+
+   #[serde(default = "default_local_active_ttl_ms")]
+   pub local_active_ttl_ms: u64,
+
+   #[serde(default = "default_owner_hysteresis_ms")]
+   pub owner_hysteresis_ms: u64,
+
+   #[serde(default = "default_prefer_local_when_playing")]
+   pub prefer_local_when_playing: bool,
 }
 
 /// Represents a known `AirPods` device.
@@ -56,6 +68,22 @@ const fn default_notification_retries() -> u32 {
 
 const fn default_reconnect_delay() -> u64 {
    10
+}
+
+const fn default_multipoint_seamless_enabled() -> bool {
+   true
+}
+
+const fn default_local_active_ttl_ms() -> u64 {
+   5_000
+}
+
+const fn default_owner_hysteresis_ms() -> u64 {
+   1_200
+}
+
+const fn default_prefer_local_when_playing() -> bool {
+   true
 }
 
 /// Action to perform for a stem press gesture.
@@ -131,6 +159,10 @@ impl Default for Config {
          notification_retries: default_notification_retries(),
          log_filter: None,
          gestures: GestureConfig::default(),
+         multipoint_seamless_enabled: default_multipoint_seamless_enabled(),
+         local_active_ttl_ms: default_local_active_ttl_ms(),
+         owner_hysteresis_ms: default_owner_hysteresis_ms(),
+         prefer_local_when_playing: default_prefer_local_when_playing(),
       }
    }
 }

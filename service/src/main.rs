@@ -377,6 +377,20 @@ impl EventProcessor {
             }
             Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
          },
+         #[cfg(feature = "experimental-aap-hints")]
+         AirPodsEvent::RemoteControlHinted(hint) => {
+            debug!(
+               "Remote control hint for {}: selector=0x{:02x} state=0x{:02x}",
+               addr_str, hint.selector, hint.state
+            );
+         },
+         #[cfg(feature = "experimental-aap-hints")]
+         AirPodsEvent::RoutingStateHinted(hint) => {
+            debug!(
+               "Routing state hint for {}: route=0x{:02x} detail=0x{:02x}",
+               addr_str, hint.route, hint.detail
+            );
+         },
          AirPodsEvent::DeviceNameChanged(name) => {
             iface.device_name_changed(addr_str, &name).await?;
             // Emit property change for devices (name changed)

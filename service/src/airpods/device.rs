@@ -25,6 +25,8 @@ use tokio::{
    time,
 };
 
+#[cfg(feature = "experimental-aap-hints")]
+use crate::airpods::protocol::{HDR_REMOTE_CONTROL_HINT, HDR_ROUTING_STATE_HINT};
 use crate::{
    airpods::{
       parser,
@@ -135,6 +137,52 @@ impl<T: PartialEq> UpdateOp<T> {
 }
 
 impl AirPods {
+   #[cfg(feature = "experimental-aap-hints")]
+   fn try_process_experimental_packet(
+      &self,
+      address: Address,
+      packet: &Packet,
+      event_tx: &EventSender,
+   ) -> bool {
+      if packet.starts_with(HDR_REMOTE_CONTROL_HINT) {
+         match parser::parse_remote_control_hint(packet) {
+            Ok(hint) => {
+               debug!(
+                  "Remote control hint from {}: selector=0x{:02x} state=0x{:02x}",
+                  address, hint.selector, hint.state
+               );
+               event_tx.emit(self, AirPodsEvent::RemoteControlHinted(hint));
+            },
+            Err(e) => warn!("Failed to parse remote control hint: {e}"),
+         }
+         true
+      } else if packet.starts_with(HDR_ROUTING_STATE_HINT) {
+         match parser::parse_routing_state_hint(packet) {
+            Ok(hint) => {
+               debug!(
+                  "Routing state hint from {}: route=0x{:02x} detail=0x{:02x}",
+                  address, hint.route, hint.detail
+               );
+               event_tx.emit(self, AirPodsEvent::RoutingStateHinted(hint));
+            },
+            Err(e) => warn!("Failed to parse routing state hint: {e}"),
+         }
+         true
+      } else {
+         false
+      }
+   }
+
+   #[cfg(not(feature = "experimental-aap-hints"))]
+   fn try_process_experimental_packet(
+      &self,
+      _address: Address,
+      _packet: &Packet,
+      _event_tx: &EventSender,
+   ) -> bool {
+      false
+   }
+
    /// Creates a new `AirPods` device instance.
    pub fn new(address: Address, name: String, battery_study: Option<BatteryStudy>) -> Self {
       Self(Arc::new(AirPodsInner {
@@ -570,6 +618,9 @@ impl AirPods {
             },
             Err(e) => warn!("Failed to parse stem press: {e}"),
          }
+      }
+      // Candidate handoff/routing packets are feature-gated until validated.
+      else if self.try_process_experimental_packet(address, &packet, event_tx) {
       }
       // Metadata packets
       else if packet.starts_with(HDR_METADATA) {

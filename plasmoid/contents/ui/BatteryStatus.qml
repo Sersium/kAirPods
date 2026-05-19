@@ -9,7 +9,7 @@ Card {
     property var device: null
 
     title: i18n("Battery")
-    implicitHeight: Kirigami.Units.gridUnit * 8
+    implicitHeight: Kirigami.Units.gridUnit * 9
 
     function formatBatteryTime(minutes) {
         if (!minutes || minutes <= 0) return ""

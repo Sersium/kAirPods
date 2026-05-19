@@ -93,7 +93,6 @@ struct ManagedDevice {
    aap_retry_count: u32,
    last_aap_error: Option<String>,
    aap_handle: Option<JoinHandle<()>>,
-   last_seen_connected_at: Option<Instant>,
    last_aap_disconnect_at: Option<Instant>,
    recent_case_cycle: Option<Instant>,
 }
@@ -654,7 +653,6 @@ impl ManagerActor {
          aap_retry_count: 0,
          last_aap_error: None,
          aap_handle: None,
-         last_seen_connected_at: Some(Instant::now()),
          last_aap_disconnect_at: None,
          recent_case_cycle: None,
       };
@@ -671,7 +669,6 @@ impl ManagerActor {
          let was_disconnected = device.bluetooth_state == BluetoothState::Disconnected;
          device.bluetooth_state = BluetoothState::Connected;
          let now = Instant::now();
-         device.last_seen_connected_at = Some(now);
          if was_disconnected {
             device.recent_case_cycle = Some(now);
          }
@@ -741,9 +738,6 @@ impl ManagerActor {
             // Only retry AAP if Bluetooth is still connected
             device.aap_state = AAPState::WaitingToReconnect;
             device.aap_retry_count += 1;
-            if device.recent_case_cycle.is_none() {
-               device.recent_case_cycle = Some(now);
-            }
 
             let should_warm_reconnect = Self::should_use_warm_reconnect(device, now);
             let loopback = self.loopback_tx.clone();
@@ -955,10 +949,8 @@ impl ManagerActor {
                   && self.is_airpods_device(&device).await
                   && !self.has_aap_connection(addr)
                {
-                  if self.devices.contains_key(&addr) {
-                     if let Some(managed) = self.devices.get(&addr)
-                        && Self::should_use_warm_reconnect(managed, now)
-                     {
+                  if let Some(managed) = self.devices.get(&addr) {
+                     if Self::should_use_warm_reconnect(managed, now) {
                         info!(
                            "Prioritizing warm AAP reconnect from scan loop for {addr} (bluetooth connected + recent drop/case-cycle)"
                         );

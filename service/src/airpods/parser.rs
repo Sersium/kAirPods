@@ -8,6 +8,10 @@ use std::str;
 use log::{debug, warn};
 use smol_str::SmolStr;
 
+#[cfg(feature = "experimental-aap-hints")]
+use crate::airpods::protocol::{
+   HDR_REMOTE_CONTROL_HINT, HDR_ROUTING_STATE_HINT, RemoteControlHint, RoutingStateHint,
+};
 use crate::{
    airpods::protocol::{
       BatteryInfo, BatteryState, BatteryStatus, BudSide, Component, EarDetectionStatus,
@@ -296,4 +300,54 @@ pub fn parse_stem_press(data: &[u8]) -> Result<StemPressEvent> {
 
    debug!("Stem press: {press_type} on {side}");
    Ok(StemPressEvent { press_type, side })
+}
+
+#[cfg(feature = "experimental-aap-hints")]
+pub fn parse_remote_control_hint(data: &[u8]) -> Result<RemoteControlHint> {
+   if !data.starts_with(HDR_REMOTE_CONTROL_HINT) {
+      return Err(
+         ProtoError::WrongPacketType {
+            expected: "remote control hint",
+         }
+         .into(),
+      );
+   }
+   if data.len() < 9 {
+      return Err(
+         ProtoError::PacketTooShort {
+            expected: 9,
+            actual: data.len(),
+         }
+         .into(),
+      );
+   }
+   Ok(RemoteControlHint {
+      selector: data[7],
+      state: data[8],
+   })
+}
+
+#[cfg(feature = "experimental-aap-hints")]
+pub fn parse_routing_state_hint(data: &[u8]) -> Result<RoutingStateHint> {
+   if !data.starts_with(HDR_ROUTING_STATE_HINT) {
+      return Err(
+         ProtoError::WrongPacketType {
+            expected: "routing state hint",
+         }
+         .into(),
+      );
+   }
+   if data.len() < 9 {
+      return Err(
+         ProtoError::PacketTooShort {
+            expected: 9,
+            actual: data.len(),
+         }
+         .into(),
+      );
+   }
+   Ok(RoutingStateHint {
+      route: data[7],
+      detail: data[8],
+   })
 }

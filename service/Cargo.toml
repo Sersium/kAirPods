@@ -16,6 +16,12 @@ readme = "../README.md"
 keywords = ["kde", "plasma", "airpods", "bluetooth", "dbus"]
 categories = ["hardware-support", "os::linux-apis"]
 
+[features]
+default = []
+# Candidate packet IDs from AAP community reverse-engineering. Keep off by
+# default until validated against local captures.
+experimental-aap-hints = []
+
 [dependencies]
 tokio = { version = "1.47", features = ["full"] }
 zbus = { version = "5.9", features = ["tokio"] }

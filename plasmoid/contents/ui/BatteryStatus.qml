@@ -9,7 +9,7 @@ Card {
     property var device: null
 
     title: i18n("Battery")
-    implicitHeight: Kirigami.Units.gridUnit * 8
+    implicitHeight: Kirigami.Units.gridUnit * 9
 
     function formatBatteryTime(minutes) {
         if (!minutes || minutes <= 0) return ""
@@ -26,6 +26,14 @@ Card {
         } else {
             return i18n("~%1h %2m left", hours, mins)
         }
+    }
+
+    function formatCaseLevel() {
+        const caseBattery = device?.battery?.case
+        if (!caseBattery) {
+            return "--"
+        }
+        return i18n("%1%%", caseBattery.level ?? 0)
     }
 
     contentItem: Component {
@@ -74,6 +82,39 @@ Card {
                     size: Kirigami.Units.gridUnit * 3.5
                     showEarStatus: true
                     inEar: !!device?.ear_detection?.right_in_ear
+                }
+            }
+
+            // Case status (always visible, even when unavailable)
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                spacing: Kirigami.Units.smallSpacing
+
+                Kirigami.Icon {
+                    source: "battery"
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                    opacity: 0.8
+                }
+
+                Text {
+                    text: i18n("Case: %1", formatCaseLevel())
+                    font.pixelSize: Kirigami.Units.gridUnit * 0.62
+                    color: Kirigami.Theme.textColor
+                    opacity: 0.8
+                }
+
+                Kirigami.Icon {
+                    visible: !!device?.battery?.case?.charging
+                    source: "battery-charging-symbolic"
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    color: "#4CAF50"
+                }
+
+                Item {
+                    Layout.fillWidth: true
                 }
             }
 

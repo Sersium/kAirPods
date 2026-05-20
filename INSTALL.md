@@ -5,8 +5,13 @@
 - KDE Plasma 6 or later
 - Rust toolchain (1.88+)
 - BlueZ 5.50 or later
+- BlueZ configured with Apple vendor DeviceID for AirPods multipoint/handoff compatibility
 - systemd (for user services)
 - Plasma SDK (provides `kpackagetool6` for widget installation)
+
+### Multipoint/Handoff prerequisite note
+
+If you want seamless multipoint-style handoff between Linux and Apple devices, ensure your BlueZ DeviceID configuration is already set to Apple vendor identity before testing. kAirPods expects this to be preconfigured by the user.
 - Development packages:
 
   ```bash
@@ -104,6 +109,22 @@ prefer_local_when_playing = true
 Missing keys are backfilled from built-in defaults, so older config files
 continue to work.
 
+## Seamless Multipoint Verification
+
+1. **Linux playing test**
+   - Start playback on Linux.
+   - Confirm AirPods route audio from Linux and service remains connected.
+
+2. **iPhone playing test**
+   - Start playback on iPhone while Linux is idle or paused.
+   - Confirm ownership handoff to iPhone output.
+
+3. **Case in/out reconnect test**
+   - Put AirPods in case, close/open case, and reinsert.
+   - Confirm Linux reconnect path works and status repopulates.
+
+Expected ownership logic: AirPods typically keep one active playback owner; whichever device starts/keeps active playback usually holds the route until another device takes over.
+
 ## Troubleshooting
 
 ### Service fails to start
@@ -117,6 +138,24 @@ continue to work.
 - Ensure AirPods are paired via KDE Bluetooth settings first
 - Check Bluetooth is enabled: `bluetoothctl power on`
 - Verify L2CAP support: `lsmod | grep bluetooth`
+
+### Handoff does not switch between Linux and iPhone
+
+- Check service logs:
+  ```bash
+  journalctl --user -u kairpodsd -b --no-pager
+  ```
+- Monitor kAirPods D-Bus events:
+  ```bash
+  busctl --user monitor org.kairpods
+  ```
+- Verify expected D-Bus state:
+  - Use `GetDevice` / `GetDevices` to inspect the AirPods JSON and confirm the `connected` field changes when ownership or active connection changes.
+  - `DeviceConnected` / `DeviceDisconnected` signals should appear during transitions.
+  - After reconnect, `GetDevice` should continue returning updated JSON for the AirPods, including the expected `connected` state.
+- Re-check BlueZ DeviceID Apple vendor setup after BlueZ/system updates.
+
+> ⚠️ Packet-level behavior and handoff timing may vary by AirPods generation and firmware version.
 
 ### Permission issues
 

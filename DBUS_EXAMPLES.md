@@ -96,13 +96,14 @@ busctl --user monitor org.kairpods
 
 1. **Linux playing test**
    ```bash
-   busctl --user get-property org.kairpods /org/kairpods/manager org.kairpods.manager ConnectedCount
+   busctl --user call org.kairpods /org/kairpods/manager \
+       org.kairpods.manager GetDevices
    ```
-   Start playback on Linux and verify `ConnectedCount` is non-zero.
+   Start playback on Linux and verify the relevant device entry reports `connected=true` (rather than relying on `ConnectedCount`, which may remain non-zero for a managed but disconnected device).
 
 2. **iPhone playing test**
    Keep `busctl --user monitor org.kairpods` running, then start playback on iPhone.
-   Confirm you observe ownership transition signals (`DeviceDisconnected` / `DeviceConnected`) as handoff occurs.
+   Confirm you observe ownership transition signals (`DeviceDisconnected` / `DeviceConnected`) as handoff occurs, and use `GetDevices` to confirm the current per-device `connected` state after the transition.
 
 3. **Case in/out reconnect test**
    Put AirPods back in case, then take them out and reconnect.
@@ -112,15 +113,15 @@ busctl --user monitor org.kairpods
 
 - Inspect service logs:
   ```bash
-  journalctl --user -u kairpodsd.service -b --no-pager
+  journalctl --user -u kairpodsd -b --no-pager
   ```
 - Inspect D-Bus in real time:
   ```bash
   busctl --user monitor org.kairpods
   ```
 - Expected properties/signals during healthy switching:
-  - `ConnectedCount` changes with ownership transitions.
-  - `DeviceConnected` / `DeviceDisconnected` appear when links move.
+  - `DeviceConnected` / `DeviceDisconnected` signals appear when links move between devices.
+  - `GetDevice`/`GetDevices` return the device `connected` field as `true`/`false` reflecting current state.
   - `GetDevice`/`GetDevices` remain queryable and return updated JSON state post-handoff.
 
 > ⚠️ Packet-level behavior can vary by AirPods generation and firmware; exact sequence/timing may differ.

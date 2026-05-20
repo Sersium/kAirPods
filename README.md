@@ -228,7 +228,7 @@ If your AirPods connect but battery information is missing, enable debug logging
 
 3. **View logs**:
    ```bash
-   journalctl --user -u kairpodsd.service -b --no-pager
+   journalctl --user -u kairpodsd -b --no-pager
    ```
 
 The debug output will show:
@@ -249,7 +249,7 @@ Common causes for missing battery info:
 1. **Inspect service logs**:
 
    ```bash
-   journalctl --user -u kairpodsd.service -b --no-pager
+   journalctl --user -u kairpodsd -b --no-pager
    ```
 
 2. **Watch D-Bus signals live**:
@@ -259,9 +259,9 @@ Common causes for missing battery info:
    ```
 
 3. **Check expected D-Bus state**:
-   - `org.kairpods.manager.ConnectedCount` should reflect current Linux-side ownership.
+   - Do **not** use `org.kairpods.manager.ConnectedCount` as a Linux-side ownership indicator; it reflects the number of managed devices and can remain non-zero after disconnect.
    - `DeviceConnected` / `DeviceDisconnected` signals should appear during handoff/reconnect.
-   - `GetDevice` / `GetDevices` output should continue updating `battery` and feature fields after reconnect.
+   - `GetDevice` / `GetDevices` output should show the device `connected` boolean changing appropriately, and should continue updating `battery` and feature fields after reconnect.
 
 4. **BlueZ-side checks**:
    - Verify AirPods remain paired/trusted in BlueZ.

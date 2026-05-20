@@ -128,16 +128,16 @@ Expected ownership logic: AirPods typically keep one active playback owner; whic
 
 - Check service logs:
   ```bash
-  journalctl --user -u kairpodsd.service -b --no-pager
+  journalctl --user -u kairpodsd -b --no-pager
   ```
 - Monitor kAirPods D-Bus events:
   ```bash
   busctl --user monitor org.kairpods
   ```
 - Verify expected D-Bus state:
-  - `org.kairpods.manager.ConnectedCount` should change when ownership changes.
+  - Use `GetDevice` / `GetDevices` to inspect the AirPods JSON and confirm the `connected` field changes when ownership or active connection changes.
   - `DeviceConnected` / `DeviceDisconnected` signals should appear during transitions.
-  - `GetDevice` should continue returning updated JSON for the AirPods after reconnect.
+  - After reconnect, `GetDevice` should continue returning updated JSON for the AirPods, including the expected `connected` state.
 - Re-check BlueZ DeviceID Apple vendor setup after BlueZ/system updates.
 
 > ⚠️ Packet-level behavior and handoff timing may vary by AirPods generation and firmware version.

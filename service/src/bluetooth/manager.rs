@@ -794,7 +794,8 @@ impl ManagerActor {
       let adapter_info = self
          .adapters
          .get(&device.adapter_name)
-         .ok_or(AirPodsError::AdapterNotFound)?;
+         .ok_or(AirPodsError::AdapterNotFound)
+         .inspect_err(|_| debug_metrics().note_reconnect_result(false, "adapter_not_found"))?;
 
       if adapter_info.state != AdapterState::Active {
          debug_metrics().note_reconnect_result(false, "adapter_not_available");
@@ -808,7 +809,10 @@ impl ManagerActor {
       }
 
       // Get BlueZ device to verify it's paired
-      let bluer_device = adapter_info.adapter.device(addr)?;
+      let bluer_device = adapter_info
+         .adapter
+         .device(addr)
+         .inspect_err(|_| debug_metrics().note_reconnect_result(false, "bluetooth_error"))?;
       if !bluer_device.is_paired().await.unwrap_or(false) {
          // Clean up on early exit
          self.aap_connecting.remove(&addr);

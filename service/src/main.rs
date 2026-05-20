@@ -370,13 +370,15 @@ impl EventProcessor {
          .await?;
       let handle = tokio::spawn(async move {
          let mut metrics_interval = time::interval(Duration::from_secs(60));
+         metrics_interval.tick().await;
          loop {
             tokio::select! {
                _ = metrics_interval.tick() => {
                   let snapshot = debug_metrics().snapshot();
                   debug!(
-                     "metrics owner_flips={} blocked_stem_commands={} reconnect_attempts={} reconnect_successes={} reconnect_failures={}",
-                     snapshot.owner_flips,
+                     "metrics service_owner_decisions={} device_owner_decisions={} blocked_stem_commands={} reconnect_attempts={} reconnect_successes={} reconnect_failures={}",
+                     snapshot.service_owner_decisions,
+                     snapshot.device_owner_decisions,
                      snapshot.blocked_stem_commands,
                      snapshot.reconnect_attempts,
                      snapshot.reconnect_successes,

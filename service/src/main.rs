@@ -4,10 +4,14 @@
 //! in KDE Plasma, including battery monitoring, noise control, and
 //! feature management.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+   sync::Arc,
+   time::{Duration, Instant},
+};
 
 use crossbeam::queue::SegQueue;
-use log::{info, warn};
+use log::{debug, info, warn};
+use parking_lot::Mutex;
 use tokio::{signal, sync::Notify, task::JoinHandle, time};
 use zbus::{Connection, connection, object_server::InterfaceRef};
 
@@ -20,10 +24,14 @@ mod battery_provider;
 mod battery_study;
 mod bluetooth;
 mod config;
+// Remote-hint integration not yet wired; suppress dead_code for those APIs.
+#[allow(dead_code)]
+mod control_ownership;
 mod dbus;
 mod error;
 mod event;
 mod media_control;
+mod metrics;
 mod ringbuf;
 
 use crate::{
@@ -34,6 +42,7 @@ use crate::{
    config::GestureAction,
    dbus::AirPodsServiceSignals,
    error::Result,
+   metrics::{StemOwner, debug_metrics},
 };
 
 #[tokio::main]
@@ -82,7 +91,8 @@ async fn main() -> Result<()> {
    }
 
    // Create event channel
-   let event_bus = EventProcessor::new(config.gestures.clone());
+   let ownership_config = control_ownership::OwnershipConfig::from(&config);
+   let event_bus = EventProcessor::new(config.gestures.clone(), ownership_config);
 
    // Initialize battery study database
    let battery_study = match battery_study::BatteryStudy::open() {
@@ -136,19 +146,43 @@ struct EventProcessor {
    queue: SegQueue<(AirPods, AirPodsEvent)>,
    notifier: Notify,
    gesture_config: config::GestureConfig,
+   ownership_policy: Mutex<control_ownership::OwnershipPolicy>,
 }
 
 impl EventProcessor {
-   fn new(gesture_config: config::GestureConfig) -> Arc<Self> {
+   fn new(
+      gesture_config: config::GestureConfig,
+      ownership_config: control_ownership::OwnershipConfig,
+   ) -> Arc<Self> {
       Arc::new(Self {
          queue: SegQueue::new(),
          notifier: Notify::new(),
          gesture_config,
+         ownership_policy: Mutex::new(control_ownership::OwnershipPolicy::new(ownership_config)),
       })
    }
 }
 
 impl EventProcessor {
+   async fn refresh_control_owner_properties(
+      iface: &InterfaceRef<AirPodsService>,
+      reason: &str,
+   ) -> Result<()> {
+      if media_control::refresh_control_owner(reason).await {
+         iface
+            .get_mut()
+            .await
+            .control_owner_changed(iface.signal_emitter())
+            .await?;
+         iface
+            .get_mut()
+            .await
+            .control_owner_details_changed(iface.signal_emitter())
+            .await?;
+      }
+      Ok(())
+   }
+
    async fn recv(self: &Arc<Self>) -> Option<(AirPods, AirPodsEvent)> {
       loop {
          if let Some(event) = self.queue.pop() {
@@ -186,6 +220,7 @@ impl EventProcessor {
                .await
                .connected_count_changed(iface.signal_emitter())
                .await?;
+            Self::refresh_control_owner_properties(iface, "device_connected").await?;
          },
          AirPodsEvent::DeviceDisconnected => {
             iface.device_disconnected(addr_str).await?;
@@ -204,6 +239,7 @@ impl EventProcessor {
                .await
                .connected_count_changed(iface.signal_emitter())
                .await?;
+            Self::refresh_control_owner_properties(iface, "device_disconnected").await?;
          },
          AirPodsEvent::BatteryUpdated(battery) => {
             iface
@@ -255,6 +291,10 @@ impl EventProcessor {
             // Handle play/pause based on ear detection
             // Pause when at least one earbud is removed, play only when both are in
             let both_in_ear = ear_detection.is_left_in_ear() && ear_detection.is_right_in_ear();
+            self
+               .ownership_policy
+               .lock()
+               .update_from_local_playback(both_in_ear, Instant::now());
             if both_in_ear {
                // Both AirPods are in ear - send play command
                media_control::send_play().await;
@@ -262,6 +302,7 @@ impl EventProcessor {
                // At least one AirPod is out of ear - send pause command
                media_control::send_pause().await;
             }
+            Self::refresh_control_owner_properties(iface, "ear_detection").await?;
          },
          AirPodsEvent::StemPressed(stem_event) => {
             iface
@@ -275,10 +316,54 @@ impl EventProcessor {
                StemPressType::Long => &self.gesture_config.long_press,
             };
 
+            let (owner, reason, forwarded) = if *action == GestureAction::None {
+               (StemOwner::Device, "configured_action_none", false)
+            } else {
+               (StemOwner::Service, "configured_action", true)
+            };
+            debug_metrics().note_owner_decision(owner, reason);
+            debug_metrics().note_stem_event(
+               addr_str,
+               owner,
+               forwarded,
+               reason,
+               stem_event.press_type.to_str(),
+            );
+
             match action {
-               GestureAction::PlayPause => media_control::send_play_pause().await,
-               GestureAction::Next => media_control::send_next().await,
-               GestureAction::Previous => media_control::send_previous().await,
+               GestureAction::PlayPause => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_play_pause().await
+                  } else {
+                     debug!("Skipping local PlayPause: remote has media ownership")
+                  }
+               },
+               GestureAction::Next => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_next().await
+                  } else {
+                     debug!("Skipping local Next: remote has media ownership")
+                  }
+               },
+               GestureAction::Previous => {
+                  if self
+                     .ownership_policy
+                     .lock()
+                     .should_handle_media_controls(Instant::now())
+                  {
+                     media_control::send_previous().await
+                  } else {
+                     debug!("Skipping local Previous: remote has media ownership")
+                  }
+               },
                GestureAction::CycleNoiseMode => {
                   if let Some(current_mode) = device.noise_mode() {
                      let next_mode = device
@@ -304,8 +389,25 @@ impl EventProcessor {
                      }
                   }
                },
-               GestureAction::None => {},
+               GestureAction::None => {
+                  debug!("Stem action blocked for {addr_str}: no mapped command");
+               },
             }
+            Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
+         },
+         #[cfg(feature = "experimental-aap-hints")]
+         AirPodsEvent::RemoteControlHinted(hint) => {
+            debug!(
+               "Remote control hint for {}: selector=0x{:02x} state=0x{:02x}",
+               addr_str, hint.selector, hint.state
+            );
+         },
+         #[cfg(feature = "experimental-aap-hints")]
+         AirPodsEvent::RoutingStateHinted(hint) => {
+            debug!(
+               "Routing state hint for {}: route=0x{:02x} detail=0x{:02x}",
+               addr_str, hint.route, hint.detail
+            );
          },
          AirPodsEvent::DeviceNameChanged(name) => {
             iface.device_name_changed(addr_str, &name).await?;
@@ -351,8 +453,22 @@ impl EventProcessor {
          .interface::<_, AirPodsService>("/org/kairpods/manager")
          .await?;
       let handle = tokio::spawn(async move {
+         let mut metrics_interval = time::interval(Duration::from_secs(60));
+         metrics_interval.tick().await;
          loop {
             tokio::select! {
+               _ = metrics_interval.tick() => {
+                  let snapshot = debug_metrics().snapshot();
+                  debug!(
+                     "metrics service_owner_decisions={} device_owner_decisions={} blocked_stem_commands={} reconnect_attempts={} reconnect_successes={} reconnect_failures={}",
+                     snapshot.service_owner_decisions,
+                     snapshot.device_owner_decisions,
+                     snapshot.blocked_stem_commands,
+                     snapshot.reconnect_attempts,
+                     snapshot.reconnect_successes,
+                     snapshot.reconnect_failures
+                  );
+               }
                event = self.recv() => {
                   let Some(event) = event else { break };
                   if let Err(e) = self.dispatch(&iface, &mut battery_provider, event).await {

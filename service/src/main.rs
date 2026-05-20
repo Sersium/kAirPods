@@ -31,6 +31,7 @@ mod dbus;
 mod error;
 mod event;
 mod media_control;
+mod metrics;
 mod ringbuf;
 
 use crate::{
@@ -41,6 +42,7 @@ use crate::{
    config::GestureAction,
    dbus::AirPodsServiceSignals,
    error::Result,
+   metrics::{StemOwner, debug_metrics},
 };
 
 #[tokio::main]
@@ -314,6 +316,20 @@ impl EventProcessor {
                StemPressType::Long => &self.gesture_config.long_press,
             };
 
+            let (owner, reason, forwarded) = if *action == GestureAction::None {
+               (StemOwner::Device, "configured_action_none", false)
+            } else {
+               (StemOwner::Service, "configured_action", true)
+            };
+            debug_metrics().note_owner_decision(owner, reason);
+            debug_metrics().note_stem_event(
+               addr_str,
+               owner,
+               forwarded,
+               reason,
+               stem_event.press_type.to_str(),
+            );
+
             match action {
                GestureAction::PlayPause => {
                   if self
@@ -373,7 +389,9 @@ impl EventProcessor {
                      }
                   }
                },
-               GestureAction::None => {},
+               GestureAction::None => {
+                  debug!("Stem action blocked for {addr_str}: no mapped command");
+               },
             }
             Self::refresh_control_owner_properties(iface, "stem_pressed").await?;
          },
@@ -435,8 +453,22 @@ impl EventProcessor {
          .interface::<_, AirPodsService>("/org/kairpods/manager")
          .await?;
       let handle = tokio::spawn(async move {
+         let mut metrics_interval = time::interval(Duration::from_secs(60));
+         metrics_interval.tick().await;
          loop {
             tokio::select! {
+               _ = metrics_interval.tick() => {
+                  let snapshot = debug_metrics().snapshot();
+                  debug!(
+                     "metrics service_owner_decisions={} device_owner_decisions={} blocked_stem_commands={} reconnect_attempts={} reconnect_successes={} reconnect_failures={}",
+                     snapshot.service_owner_decisions,
+                     snapshot.device_owner_decisions,
+                     snapshot.blocked_stem_commands,
+                     snapshot.reconnect_attempts,
+                     snapshot.reconnect_successes,
+                     snapshot.reconnect_failures
+                  );
+               }
                event = self.recv() => {
                   let Some(event) = event else { break };
                   if let Err(e) = self.dispatch(&iface, &mut battery_provider, event).await {
